@@ -18,6 +18,7 @@ class SimulatorBackend(CameraBackend):
         self._exposure_us = 1_000_000
         self._gain = 1.0
         self._night = True
+        self._focus = False
         self._size = 720
         rng = np.random.default_rng(42)
         n = 420
@@ -35,9 +36,11 @@ class SimulatorBackend(CameraBackend):
         self._exposure_us = exposure_us
         self._gain = gain
         self._night = night
+        self._focus = settings.camera.focus_mode
 
-    def capture(self) -> Frame:
-        time.sleep(min(0.08, self._exposure_us / 1_000_000 * 0.02))
+    def capture(self, raw_path=None) -> Frame:
+        if not getattr(self, "_focus", False):
+            time.sleep(min(0.08, self._exposure_us / 1_000_000 * 0.02))
         rgb = self._render()
         return Frame(rgb=rgb, exposure_us=self._exposure_us, gain=self._gain, sensor="simulator")
 

@@ -1,22 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date
 from typing import Any
 
 import numpy as np
 from PIL import Image
 
+from zenith.archive.store import save_frame, should_save
 from zenith.camera import create_backend
 from zenith.camera.base import CameraBackend, CameraError, Frame
 from zenith.config.schema import ExposureProfile, ZenithSettings
 from zenith.config.store import load_settings
+from zenith.imaging import apply_colour_gains, downscale, encode_jpeg, orient
 from zenith.overlay import apply_overlay
-from zenith.paths import LATEST_JPEG, LATEST_META, ensure_data_dir
-from zenith.sky.sun import sky_mode, sun_altitude_deg
+from zenith.paths import LATEST_JPEG, LATEST_META, ensure_data_dir, raw_dir
+from zenith.products.service import ProductService
+from zenith.sky.sun import SkySession, local_time, sky_session
 
 
 @dataclass
@@ -31,6 +33,11 @@ class Telemetry:
     ts: str = ""
     error: str | None = None
     capturing: bool = False
+    session: str = ""
+    stars: int = 0
+    saved: bool = False
+    focus: bool = False
+    camera: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +51,11 @@ class Telemetry:
             "ts": self.ts,
             "error": self.error,
             "capturing": self.capturing,
+            "session": self.session,
+            "stars": self.stars,
+            "saved": self.saved,
+            "focus": self.focus,
+            "camera": self.camera,
         }
 
 
@@ -88,6 +100,12 @@ class CaptureService:
         self._reload = asyncio.Event()
         self.exposure_us = 1_000_000
         self.gain = 1.0
+        self.products = ProductService()
+        self._last_kind: str | None = None
+        self._last_date: date | None = None
+        self._encode_task: asyncio.Task | None = None
+        self._ctrl_key: tuple | None = None
+        self._held = False
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -101,10 +119,28 @@ class CaptureService:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        settings = load_settings()
+        if self.products.session_date is not None:
+            await asyncio.to_thread(self.products.finalize, self.products.session_date, settings)
         self._close_backend()
 
     def request_reload(self) -> None:
         self._reload.set()
+
+    def disconnect(self) -> None:
+        """Release the CSI camera so it can be unplugged or used by another process."""
+        self._held = True
+        self.request_reload()
+
+    def connect(self) -> None:
+        self._held = False
+        self.request_reload()
+
+    def camera_state(self) -> dict[str, bool]:
+        return {
+            "connected": self._backend is not None and not self._held,
+            "released": self._held,
+        }
 
     def _close_backend(self) -> None:
         if self._backend is not None:
@@ -117,10 +153,27 @@ class CaptureService:
     async def _run(self) -> None:
         ensure_data_dir()
         while True:
+            if self._held:
+                self._close_backend()
+                settings = load_settings()
+                tel = Telemetry(
+                    backend=settings.camera.backend,
+                    capturing=False,
+                    camera=False,
+                    ts=_now(),
+                )
+                await self.hub.publish(_placeholder_jpeg("Camera disconnected"), tel)
+                self._reload.clear()
+                try:
+                    await asyncio.wait_for(self._reload.wait(), timeout=2.0)
+                except TimeoutError:
+                    pass
+                continue
             settings = load_settings()
             self._reload.clear()
             try:
                 self._close_backend()
+                self._ctrl_key = None
                 self._backend = await asyncio.to_thread(create_backend, settings)
                 await self._loop(settings)
             except asyncio.CancelledError:
@@ -130,9 +183,12 @@ class CaptureService:
                     backend=settings.camera.backend,
                     error=str(exc),
                     capturing=False,
+                    camera=False,
                     ts=_now(),
                 )
                 await self.hub.publish(_placeholder_jpeg(str(exc)), tel)
+                if self._held:
+                    continue
                 try:
                     await asyncio.wait_for(self._reload.wait(), timeout=3.0)
                 except TimeoutError:
@@ -142,64 +198,149 @@ class CaptureService:
         assert self._backend is not None
         backend = self._backend
         while not self._reload.is_set():
+            if self._held:
+                break
             settings = load_settings()
-            sun_alt = sun_altitude_deg(settings.location.latitude, settings.location.longitude)
-            mode = sky_mode(sun_alt, settings.location.night_sun_altitude_deg)
-            night = mode == "night"
+            session = sky_session(
+                settings.location.latitude,
+                settings.location.longitude,
+                settings.location.timezone,
+                settings.location.night_sun_altitude_deg,
+            )
+            await self._maybe_finalize(session, settings)
+            self._kick_encode(settings)
+            night = session.mode == "night"
+            focus = bool(settings.camera.focus_mode)
+            opened_focus = bool(getattr(backend, "_focus", False))
+            if focus != opened_focus:
+                self.request_reload()
+                break
             profile = settings.night if night else settings.day
             should_capture = settings.camera.capture_night if night else settings.camera.capture_day
             if not should_capture:
                 tel = Telemetry(
-                    mode=mode,
-                    sun_alt=sun_alt,
+                    mode=session.mode,
+                    sun_alt=session.sun_alt,
                     backend=backend.name,
                     capturing=False,
+                    camera=True,
                     ts=_now(),
+                    session=f"{session.kind}:{session.date.isoformat()}",
+                    focus=focus,
                 )
                 await self.hub.publish(self.hub.jpeg or _placeholder_jpeg("capture paused"), tel)
                 await asyncio.sleep(2)
                 continue
 
+            max_exp = profile.max_exposure_us
             if profile.auto_exposure:
-                self._servo(profile)
+                self._servo(profile, max_exposure_us=max_exp)
             else:
-                self.exposure_us = profile.exposure_us
-                self.gain = profile.gain
+                self.exposure_us = int(profile.exposure_us)
+                self.gain = float(profile.gain)
+            self.exposure_us = int(np.clip(self.exposure_us, 100, max_exp))
 
-            await asyncio.to_thread(
-                backend.configure, settings, int(self.exposure_us), float(self.gain), night
+            p = settings.picamera2
+            ctrl_key = (
+                int(self.exposure_us),
+                round(float(self.gain), 3),
+                night,
+                round(float(p.contrast), 3),
+                round(float(p.saturation), 3),
+                round(float(p.sharpness), 3),
+                bool(p.awb_enable_day),
             )
+            if ctrl_key != self._ctrl_key:
+                await asyncio.to_thread(
+                    backend.configure, settings, int(self.exposure_us), float(self.gain), night
+                )
+                self._ctrl_key = ctrl_key
+            will_save = False
+            raw_dest = None
+            when_local = local_time(settings.location.timezone)
             try:
-                frame: Frame = await asyncio.to_thread(backend.capture)
+                will_save = (not focus) and should_save(session.kind, settings)
+                if will_save and settings.camera.save_raw and backend.name == "picamera2":
+                    stem = when_local.strftime("%Y%m%d_%H%M%S")
+                    raw_dest = raw_dir(session.kind, session.date) / f"{stem}.dng"
+                frame: Frame = await asyncio.to_thread(backend.capture, raw_dest)
             except CameraError as exc:
                 raise exc
 
-            rgb = _orient(frame.rgb, settings.camera.flip_h, settings.camera.flip_v, settings.camera.rotation_deg)
-            mean = float(rgb.mean() / 255.0)
+            rgb_linear = orient(frame.rgb, settings.camera.flip_h, settings.camera.flip_v, settings.camera.rotation_deg)
+            mean = float(rgb_linear.mean() / 255.0)
             self._last_mean = mean
-            overlaid = apply_overlay(
-                rgb,
-                overlay=settings.overlay,
-                mode=mode,
-                sun_alt=sun_alt,
-                exposure_us=frame.exposure_us,
-                gain=frame.gain,
-                mean=mean,
-                backend=backend.name,
+            red_gain = settings.picamera2.colour_gain_r
+            green_gain = settings.picamera2.colour_gain_g
+            blue_gain = settings.picamera2.colour_gain_b
+            rgb_preview = apply_colour_gains(
+                rgb_linear,
+                red_gain=red_gain,
+                green_gain=green_gain,
+                blue_gain=blue_gain,
             )
-            jpeg = _encode_jpeg(overlaid, settings.camera.jpeg_quality)
-            await asyncio.to_thread(_write_latest, jpeg, {
-                "mode": mode,
-                "sun_alt": sun_alt,
-                "exposure_us": frame.exposure_us,
-                "gain": frame.gain,
-                "adu": mean,
-                "backend": backend.name,
-                "ts": _now(),
-            })
+            jpeg = encode_jpeg(
+                downscale(rgb_preview, 1920),
+                min(settings.camera.jpeg_quality, 85),
+                optimize=False,
+            )
+            overlaid = rgb_preview
+            if not focus:
+                overlaid = apply_overlay(
+                    rgb_preview,
+                    overlay=settings.overlay,
+                    mode=session.mode,
+                    sun_alt=session.sun_alt,
+                    exposure_us=frame.exposure_us,
+                    gain=frame.gain,
+                    mean=mean,
+                    backend=backend.name,
+                    cardinal_offset_deg=settings.location.keogram_angle_deg,
+                )
+            saved = False
+            stars = 0
+            if will_save:
+                await asyncio.to_thread(
+                    save_frame,
+                    rgb_linear=rgb_linear,
+                    rgb_preview=overlaid,
+                    kind=session.kind,
+                    session_date=session.date,
+                    when_local=when_local,
+                    settings=settings,
+                    raw_path=raw_dest if raw_dest is not None and raw_dest.is_file() else None,
+                )
+                saved = True
+                if session.kind == "night":
+                    info = await asyncio.to_thread(
+                        self.products.on_saved_frame,
+                        rgb_linear,
+                        mean,
+                        session.date,
+                        settings,
+                    )
+                    stars = int(info["stars"])
+            if not focus:
+                await asyncio.to_thread(
+                    _write_latest,
+                    encode_jpeg(overlaid, settings.camera.jpeg_quality),
+                    {
+                        "mode": session.mode,
+                        "sun_alt": session.sun_alt,
+                        "exposure_us": frame.exposure_us,
+                        "gain": frame.gain,
+                        "adu": mean,
+                        "backend": backend.name,
+                        "ts": _now(),
+                        "session": f"{session.kind}:{session.date.isoformat()}",
+                        "saved": saved,
+                        "stars": stars,
+                        "focus": focus,
+                    },
+                )
             tel = Telemetry(
-                mode=mode,
-                sun_alt=sun_alt,
+                mode=session.mode,
+                sun_alt=session.sun_alt,
                 exposure_us=frame.exposure_us,
                 gain=frame.gain,
                 adu=mean,
@@ -207,21 +348,49 @@ class CaptureService:
                 sensor=frame.sensor,
                 ts=_now(),
                 capturing=True,
+                camera=True,
+                session=f"{session.kind}:{session.date.isoformat()}",
+                stars=stars,
+                saved=saved,
+                focus=focus,
             )
-            preview = _encode_jpeg(_downscale(overlaid, 960), min(settings.camera.jpeg_quality, 80))
-            await self.hub.publish(preview, tel)
-            delay = settings.camera.extra_delay_s
-            if delay:
-                await asyncio.sleep(delay)
+            await self.hub.publish(jpeg, tel)
+            if not focus:
+                delay = settings.camera.extra_delay_s
+                if delay:
+                    await asyncio.sleep(delay)
 
-    def _servo(self, profile: ExposureProfile) -> None:
+    async def _maybe_finalize(self, session: SkySession, settings: ZenithSettings) -> None:
+        prev_kind, prev_date = self._last_kind, self._last_date
+        self._last_kind = session.kind
+        self._last_date = session.date
+        if prev_kind == "night" and prev_date is not None:
+            ended = session.kind == "day" or session.date != prev_date
+            if ended:
+                await asyncio.to_thread(self.products.finalize, prev_date, settings)
+                self._kick_encode(settings)
+
+    def _kick_encode(self, settings: ZenithSettings) -> None:
+        if self._encode_task and not self._encode_task.done():
+            return
+        target, mini, full = self.products.take_encode_job()
+        if target is None or (not mini and not full):
+            return
+
+        async def _run() -> None:
+            await asyncio.to_thread(self.products.encode, target, settings, mini, full)
+
+        self._encode_task = asyncio.create_task(_run(), name="zenith-timelapse")
+
+    def _servo(self, profile: ExposureProfile, max_exposure_us: int | None = None) -> None:
         mean = getattr(self, "_last_mean", profile.target_mean)
         error = profile.target_mean - mean
         if abs(error) < 0.02:
             return
         factor = 1.0 + error * 1.4
-        nxt = int(np.clip(self.exposure_us * factor, 200, profile.max_exposure_us))
-        if nxt >= profile.max_exposure_us and error > 0:
+        cap = int(max_exposure_us if max_exposure_us is not None else profile.max_exposure_us)
+        nxt = int(np.clip(self.exposure_us * factor, 200, cap))
+        if nxt >= cap and error > 0:
             self.gain = float(np.clip(self.gain * factor, 1.0, profile.max_gain))
         else:
             self.gain = max(1.0, min(self.gain, profile.max_gain))
@@ -229,38 +398,9 @@ class CaptureService:
 
 
 def _now() -> str:
+    from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _orient(rgb: np.ndarray, flip_h: bool, flip_v: bool, rotation: int) -> np.ndarray:
-    if flip_h:
-        rgb = np.fliplr(rgb)
-    if flip_v:
-        rgb = np.flipud(rgb)
-    if rotation == 90:
-        rgb = np.rot90(rgb, 1)
-    elif rotation == 180:
-        rgb = np.rot90(rgb, 2)
-    elif rotation == 270:
-        rgb = np.rot90(rgb, 3)
-    return np.ascontiguousarray(rgb)
-
-
-def _encode_jpeg(rgb: np.ndarray, quality: int) -> bytes:
-    img = Image.fromarray(rgb, mode="RGB")
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=int(quality), optimize=True)
-    return buf.getvalue()
-
-
-def _downscale(rgb: np.ndarray, max_side: int) -> np.ndarray:
-    h, w = rgb.shape[:2]
-    scale = max_side / max(h, w)
-    if scale >= 1:
-        return rgb
-    img = Image.fromarray(rgb)
-    img = img.resize((int(w * scale), int(h * scale)), Image.Resampling.BILINEAR)
-    return np.array(img)
 
 
 def _write_latest(jpeg: bytes, meta: dict) -> None:
@@ -275,6 +415,6 @@ def _placeholder_jpeg(message: str) -> bytes:
     draw = ImageDraw.Draw(img)
     draw.text((40, 320), "ZENITH", fill=(125, 211, 252))
     draw.text((40, 360), message[:120], fill=(226, 232, 240))
-    buf = io.BytesIO()
+    buf = __import__("io").BytesIO()
     img.save(buf, format="JPEG", quality=80)
     return buf.getvalue()

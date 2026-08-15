@@ -19,15 +19,32 @@ type JsonSchema = {
 type Values = Record<string, unknown>;
 
 const GROUP_COPY: Record<string, string> = {
-  location: "Where the camera sits. Drives day/night, satellites, and aurora.",
-  camera: "How Zenith talks to the sensor and what it saves.",
-  picamera2: "Raspberry Pi CSI / HQ camera ISP controls.",
-  indi: "USB astro cameras via indiserver (Phase 5).",
-  mqtt_camera: "Remote Pi that owns its own libcamera module.",
-  day: "Exposure profile while the sun is up.",
-  night: "Exposure profile after astronomical night begins.",
-  overlay: "Text and cardinals burned into archived frames.",
+  location: "Site position for day/night, satellites, and aurora.",
+  camera: "Sensor, archive, and capture pipeline.",
+  picamera2: "Raspberry Pi HQ / IMX477 ISP.",
+  indi: "USB astro cameras via indiserver.",
+  mqtt_camera: "Remote Pi camera over MQTT.",
+  day: "Exposure while the sun is up.",
+  night: "Exposure after night begins.",
+  overlay: "Text on the live JPEG and thumbs. Raw stays clean.",
+  products: "Keograms, startrails, and timelapses.",
 };
+
+const GROUP_LABEL: Record<string, string> = {
+  location: "Location",
+  camera: "Camera",
+  picamera2: "HQ camera",
+  indi: "INDI",
+  mqtt_camera: "MQTT camera",
+  day: "Day",
+  night: "Night",
+  overlay: "Overlay",
+  products: "Products",
+};
+
+function labelFor(key: string) {
+  return GROUP_LABEL[key] ?? key.replaceAll("_", " ");
+}
 
 export default function Settings() {
   const client = useQueryClient();
@@ -40,6 +57,7 @@ export default function Settings() {
     queryFn: () => fetch("/api/settings").then((r) => r.json() as Promise<Values>),
   });
   const [draft, setDraft] = useState<Values | null>(null);
+  const [active, setActive] = useState<string>("");
 
   useEffect(() => {
     if (valuesQuery.data) setDraft(valuesQuery.data);
@@ -71,37 +89,73 @@ export default function Settings() {
     });
   }, [schemaQuery.data, draft]);
 
-  if (!draft || !schemaQuery.data) {
-    return <p className="text-white/50">Loading settings schema…</p>;
+  useEffect(() => {
+    if (!groups.length) return;
+    const fromHash = window.location.hash.replace(/^#/, "");
+    const next = groups.some((g) => g.key === fromHash) ? fromHash : groups[0].key;
+    setActive((current) => current || next);
+  }, [groups]);
+
+  function select(key: string) {
+    setActive(key);
+    window.history.replaceState(null, "", `#${key}`);
   }
 
-  return (
-    <div className="space-y-8">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="font-serif text-4xl text-ice">Settings</h1>
-          <p className="mt-2 max-w-2xl text-sm text-white/50">
-            Generated from the Pydantic schema. Each control includes the description that will ship
-            with the camera. Saving reloads the capture loop.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => save.mutate(draft)}
-          className="rounded-full bg-ice px-5 py-2 text-sm font-medium text-ink hover:bg-white"
-        >
-          {save.isPending ? "Saving…" : "Save & apply"}
-        </button>
-      </div>
-      {save.isError ? <p className="text-amber-300">{String(save.error)}</p> : null}
-      {save.isSuccess ? <p className="text-aurora">Applied. Capture will pick this up on the next frame.</p> : null}
+  if (!draft || !schemaQuery.data) {
+    return <p className="text-white/50">Loading settings…</p>;
+  }
 
-      {groups.map((group) => (
-        <section key={group.key} className="rounded-3xl border border-white/8 bg-panel/70 p-6">
-          <h2 className="font-serif text-2xl capitalize text-star">{group.key.replaceAll("_", " ")}</h2>
-          <p className="mt-1 mb-6 text-sm text-white/45">{GROUP_COPY[group.key] ?? ""}</p>
-          <div className="grid gap-5 md:grid-cols-2">
-            {Object.entries(group.spec.properties ?? {}).map(([field, spec]) => (
+  const group = groups.find((g) => g.key === active) ?? groups[0];
+  const fields = Object.entries(group.spec.properties ?? {});
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <h1 className="display text-4xl text-ice">Settings</h1>
+        <div className="flex items-center gap-3">
+          {save.isError ? <p className="text-sm text-amber-300">{String(save.error)}</p> : null}
+          {save.isSuccess ? <p className="text-sm text-aurora">Saved</p> : null}
+          <button
+            type="button"
+            onClick={() => save.mutate(draft)}
+            className="rounded-full bg-ice px-5 py-2 text-sm font-medium text-ink hover:bg-white"
+          >
+            {save.isPending ? "Saving…" : "Save & apply"}
+          </button>
+        </div>
+      </div>
+
+      <div className="lg:grid lg:grid-cols-[13.5rem_minmax(0,1fr)] lg:items-start lg:gap-6">
+        <aside className="mb-4 lg:sticky lg:top-24 lg:mb-0">
+          <nav className="flex gap-1 overflow-x-auto lg:flex-col lg:overflow-visible">
+            {groups.map((item) => {
+              const on = item.key === group.key;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => select(item.key)}
+                  className={`shrink-0 rounded-lg px-3 py-2 text-left text-sm transition ${
+                    on ? "bg-white/10 text-ice" : "text-white/50 hover:bg-white/5 hover:text-white/80"
+                  }`}
+                >
+                  {labelFor(item.key)}
+                </button>
+              );
+            })}
+          </nav>
+        </aside>
+
+        <section>
+          <div className="mb-4">
+            <h2 className="display text-2xl text-star">{labelFor(group.key)}</h2>
+            {GROUP_COPY[group.key] ? (
+              <p className="mt-1 text-sm text-white/40">{GROUP_COPY[group.key]}</p>
+            ) : null}
+          </div>
+          {group.key === "camera" ? <CameraPower /> : null}
+          <div className="divide-y divide-white/8 rounded-2xl border border-white/8 bg-panel/60">
+            {fields.map(([field, spec]) => (
               <Field
                 key={field}
                 name={field}
@@ -117,7 +171,69 @@ export default function Settings() {
             ))}
           </div>
         </section>
-      ))}
+      </div>
+    </div>
+  );
+}
+
+function CameraPower() {
+  const [state, setState] = useState<{ connected: boolean; released: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let stop = false;
+    async function tick() {
+      try {
+        const res = await fetch("/api/camera");
+        if (!res.ok) return;
+        const data = (await res.json()) as { connected: boolean; released: boolean };
+        if (!stop) setState(data);
+      } catch {
+        /* ignore */
+      }
+    }
+    void tick();
+    const id = window.setInterval(() => void tick(), 2000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, []);
+
+  async function toggle() {
+    if (!state) return;
+    setBusy(true);
+    try {
+      const path = state.released ? "/api/camera/connect" : "/api/camera/disconnect";
+      const res = await fetch(path, { method: "POST" });
+      if (res.ok) setState((await res.json()) as { connected: boolean; released: boolean });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const on = Boolean(state && !state.released);
+
+  return (
+    <div className="mb-4 flex items-center justify-between gap-4 rounded-2xl border border-white/8 bg-panel/60 px-5 py-4">
+      <div>
+        <p className="text-sm text-white/90">Sensor</p>
+        <p className="mt-0.5 text-xs text-white/40">
+          {on
+            ? "Camera is open. Disconnect before unplugging the CSI cable."
+            : "Camera is released. Safe to unplug, or connect to start capturing again."}
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={() => void toggle()}
+        disabled={busy || !state}
+        className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${
+          on ? "bg-white/10 text-white/80 hover:bg-red-500/20 hover:text-red-200" : "bg-aurora/20 text-aurora"
+        }`}
+      >
+        {busy ? "Working…" : on ? "Disconnect camera" : "Connect camera"}
+      </button>
     </div>
   );
 }
@@ -147,8 +263,9 @@ function Field({
 }) {
   const type = Array.isArray(spec.type) ? spec.type[0] : spec.type;
   const title = spec.title ?? name.replaceAll("_", " ");
+  const wide = type === "string" && !spec.enum;
   const inputClass =
-    "mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-ice/60";
+    "w-full rounded-lg border border-white/10 bg-black/35 px-3 py-1.5 text-sm text-white outline-none focus:border-ice/50";
 
   let control: ReactNode;
   if (spec.enum) {
@@ -165,20 +282,23 @@ function Field({
     control = (
       <button
         type="button"
+        role="switch"
+        aria-checked={Boolean(value)}
         onClick={() => onChange(!value)}
-        className={`mt-2 inline-flex rounded-full px-3 py-1 text-xs font-medium ${
-          value ? "bg-aurora/20 text-aurora" : "bg-white/10 text-white/50"
-        }`}
+        className={`relative h-6 w-10 shrink-0 rounded-full transition ${value ? "bg-aurora" : "bg-white/15"}`}
       >
-        {value ? "On" : "Off"}
+        <span
+          className="absolute top-0.5 h-5 w-5 rounded-full bg-white transition"
+          style={{ left: value ? "1.125rem" : "0.125rem" }}
+        />
       </button>
     );
   } else if (type === "integer" || type === "number") {
     control = (
       <input
-        className={inputClass}
+        className={`${inputClass} text-right tabular-nums`}
         type="number"
-        step={type === "integer" ? 1 : "any"}
+        step={type === "integer" ? 1 : 0.01}
         min={spec.minimum}
         max={spec.maximum}
         value={value === undefined || value === null ? "" : String(value)}
@@ -187,22 +307,22 @@ function Field({
     );
   } else {
     control = (
-      <input
-        className={inputClass}
-        value={String(value ?? "")}
-        onChange={(e) => onChange(e.target.value)}
-      />
+      <input className={inputClass} value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />
     );
   }
 
   return (
-    <label className="block">
-      <span className="text-sm font-medium capitalize text-white/90">{title}</span>
-      {control}
-      {spec.description ? (
-        <span className="mt-2 block text-xs leading-relaxed text-white/40">{spec.description}</span>
-      ) : null}
-    </label>
+    <div className={`px-5 py-3.5 ${wide ? "space-y-2" : "flex items-center justify-between gap-6"}`}>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm text-white/90">{title}</p>
+        {spec.description ? (
+          <p className="mt-0.5 line-clamp-1 text-xs text-white/35" title={spec.description}>
+            {spec.description}
+          </p>
+        ) : null}
+      </div>
+      <div className={wide ? "w-full" : "w-40 shrink-0"}>{control}</div>
+    </div>
   );
 }
 

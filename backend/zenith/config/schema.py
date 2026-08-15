@@ -1,15 +1,40 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 BackendName = Literal["simulator", "picamera2", "indi", "mqtt_libcamera"]
 Binning = Literal[1, 2]
 
+_HQ_TUNING = "/usr/share/libcamera/ipa/rpi/pisp/imx477.json"
+
 
 def _f(description: str, **kwargs):
     return Field(description=description, **kwargs)
+
+
+def detect_camera_backend() -> BackendName:
+    """Picamera2 on a Pi with python3-picamera2; simulator everywhere else."""
+    try:
+        import picamera2  # noqa: F401
+    except ImportError:
+        return "simulator"
+    return "picamera2"
+
+
+def default_tuning_file() -> str:
+    return _HQ_TUNING if Path(_HQ_TUNING).is_file() else ""
+
+
+def default_timezone() -> str:
+    path = Path("/etc/timezone")
+    if path.is_file():
+        tz = path.read_text(encoding="utf-8").strip()
+        if tz:
+            return tz
+    return "UTC"
 
 
 class LocationSettings(BaseModel):
@@ -34,7 +59,7 @@ class LocationSettings(BaseModel):
     )
     timezone: str = _f(
         "IANA timezone for night dating and overlays, e.g. America/Denver or Europe/Amsterdam.",
-        default="UTC",
+        default_factory=default_timezone,
     )
     keogram_angle_deg: float = _f(
         "Rotate frames so the meridian is vertical before extracting the keogram column. "
@@ -57,8 +82,9 @@ class CameraCommonSettings(BaseModel):
         "How Zenith talks to the sensor. simulator = synthetic sky for development. "
         "picamera2 = local Raspberry Pi CSI (HQ / IMX477 on acmeastro). "
         "indi = USB astro cameras via indiserver (ZWO, QHY, Svbony, …). "
-        "mqtt_libcamera = a remote Pi that owns its own camera.",
-        default="simulator",
+        "mqtt_libcamera = a remote Pi that owns its own camera. Defaults to picamera2 when "
+        "the Picamera2 package is importable (this Pi), otherwise simulator.",
+        default_factory=detect_camera_backend,
     )
     device: str = _f(
         "Camera index or INDI CCD name. For Picamera2 this is usually 0. "
@@ -67,8 +93,8 @@ class CameraCommonSettings(BaseModel):
     )
     capture_day: bool = _f("Take frames during daytime.", default=True)
     save_day: bool = _f(
-        "Archive daytime JPEGs. Night frames are always saved when capture is running. "
-        "Turn off to save disk if you only care about the night sky.",
+        "Archive daytime frames (DNG/PNG, not JPEG). Night frames are always saved when "
+        "capture is running. Turn off to save disk if you only care about the night sky.",
         default=False,
     )
     capture_night: bool = _f("Take frames after the sun drops below the night threshold.", default=True)
@@ -78,7 +104,8 @@ class CameraCommonSettings(BaseModel):
         default=2,
     )
     jpeg_quality: int = _f(
-        "JPEG quality 1–100. 90 is a good archive default. Lower for faster live previews.",
+        "JPEG quality 1–100 for live preview and archive thumbs only. Science frames are "
+        "DNG (Picamera2) or lossless PNG — never JPEG.",
         default=90,
         ge=40,
         le=100,
@@ -90,14 +117,32 @@ class CameraCommonSettings(BaseModel):
         default=0,
     )
     extra_delay_s: float = _f(
-        "Pause after each exposure before starting the next. 0 means 'as fast as the shutter allows'.",
+        "Pause after each science frame before the next. Ignored in focus mode. "
+        "0 means 'as fast as the shutter + DNG write allow'.",
         default=0.0,
         ge=0,
         le=300,
     )
+    focus_mode: bool = _f(
+        "Focus / live preview. On: JPEG only (no DNG/PNG, no extra delay, no overlay) so you "
+        "can rack the lens and tweak colour. Shutter uses the same IMX477 range as science "
+        "mode (100 µs–120 s). Off: archive 12-bit DNG + lossless PNG.",
+        default=False,
+        title="Focus mode",
+    )
     save_raw: bool = _f(
-        "Also write DNG (Picamera2) or FITS (INDI). Needed for proper darks and SQM. "
-        "HQ full-res DNG is large — keep retention aggressive on SD cards; NVMe is fine.",
+        "Write the sensor file: 12-bit DNG on Picamera2 (HQ / IMX477), lossless PNG on the "
+        "simulator. This is the science archive — keep it on. HQ DNG is large; NVMe is fine.",
+        default=True,
+    )
+    save_png: bool = _f(
+        "Also write a lossless PNG of the linear RGB (no overlay, no JPEG compression) for "
+        "timelapses and tools that cannot open DNG. Disable if disk is tight; DNG remains.",
+        default=True,
+    )
+    save_jpeg: bool = _f(
+        "Also write a full-resolution JPEG. Off by default — JPEG throws away faint stars "
+        "and colour. Live view and thumbs already use JPEG.",
         default=False,
     )
 
@@ -106,24 +151,36 @@ class Picamera2Settings(BaseModel):
     tuning_file: str = _f(
         "libcamera IPA tuning JSON. On Raspberry Pi 5 with the HQ camera this is typically "
         "/usr/share/libcamera/ipa/rpi/pisp/imx477.json. Leave empty to use the default.",
-        default="",
+        default_factory=default_tuning_file,
     )
     awb_enable_day: bool = _f(
-        "Let libcamera auto white-balance during the day. Disable at night so colour of "
-        "the sky and aurora stays consistent.",
-        default=True,
+        "Let libcamera auto white-balance during the day. Applies in focus and archive. "
+        "Off (default) keeps camera colour as-is so the Red/Green/Blue sliders match both modes.",
+        default=False,
     )
     colour_gain_r: float = _f(
-        "Manual red gain when AWB is off. Typical HQ night starting point ~2.0.",
-        default=2.0,
-        ge=0.5,
-        le=8,
+        "Red gain as a float. 1.0 is camera data unchanged, 0.0 removes red. Applied to the "
+        "live JPEG; also sent to the HQ ISP (with blue) when AWB is off. DNG is never multiplied.",
+        default=1.0,
+        ge=0.0,
+        le=32.0,
+        title="Red gain",
+    )
+    colour_gain_g: float = _f(
+        "Green gain as a float. 1.0 is camera data unchanged, 0.0 removes green. Software on "
+        "the live JPEG only — the IMX477 ISP has no separate green ColourGain.",
+        default=1.0,
+        ge=0.0,
+        le=32.0,
+        title="Green gain",
     )
     colour_gain_b: float = _f(
-        "Manual blue gain when AWB is off. Typical HQ night starting point ~1.8.",
-        default=1.8,
-        ge=0.5,
-        le=8,
+        "Blue gain as a float. 1.0 is camera data unchanged, 0.0 removes blue. Live JPEG always; "
+        "ISP when AWB is off. Lower this if the preview looks too blue.",
+        default=1.0,
+        ge=0.0,
+        le=32.0,
+        title="Blue gain",
     )
     sharpness: float = _f(
         "ISP sharpening. Too high creates rings around stars. 0–1 is usually enough.",
@@ -131,7 +188,7 @@ class Picamera2Settings(BaseModel):
         ge=0,
         le=16,
     )
-    contrast: float = _f("ISP contrast. Leave near 1.0 and stretch in software instead.", default=1.0, ge=0, le=2)
+    contrast: float = _f("ISP contrast. 1.0 is neutral (camera data as-is).", default=1.0, ge=0, le=2)
     saturation: float = _f("ISP saturation. 1.0 is neutral.", default=1.0, ge=0, le=2)
     denoise: Literal["off", "cdn_off", "cdn_fast", "cdn_hq"] = _f(
         "Pi ISP denoise. cdn_hq smears faint stars — prefer off or cdn_off for astronomy.",
@@ -169,36 +226,128 @@ class ExposureProfile(BaseModel):
     )
     exposure_us: int = _f(
         "Manual exposure in microseconds when auto-exposure is off. 1_000_000 = 1 second. "
-        "HQ IMX477 on Pi 5 can do tens of seconds; start around 8–15 s at night.",
+        "HQ IMX477 range is 100 µs–120 s. Night: start around 8–15 s.",
         default=1_000_000,
         ge=100,
-        le=200_000_000,
+        le=120_000_000,
     )
     max_exposure_us: int = _f(
-        "Longest shutter auto-exposure is allowed to use. Night: try 15_000_000 (15 s) first.",
+        "Longest shutter auto-exposure is allowed to use. Night: try 15_000_000 (15 s) first. "
+        "HQ IMX477 max in Zenith is 120 s.",
         default=15_000_000,
         ge=1000,
-        le=200_000_000,
+        le=120_000_000,
     )
-    gain: float = _f("Manual analogue gain when auto-exposure is off. HQ unity is ~1.", default=1.0, ge=1, le=16)
+    gain: float = _f("Manual analogue gain when auto-exposure is off. HQ unity is ~1, max ~22.", default=1.0, ge=1, le=22)
     max_gain: float = _f(
         "Highest analogue gain auto-exposure may use. High gain = more noise and hot pixels. "
-        "Prefer longer exposure over maxing gain.",
+        "Prefer longer exposure over maxing gain. IMX477 analogue max is about 22.",
         default=8.0,
         ge=1,
-        le=16,
+        le=22,
     )
     target_mean: float = _f(
-        "Target mean pixel value 0–1 after stretch. 0.18 is a dark but readable night sky. "
-        "0.35–0.45 suits daytime.",
+        "Target mean pixel value 0–1 for auto-exposure (camera RGB, no display stretch). "
+        "0.18 is a dark but readable night sky. 0.35–0.45 suits daytime.",
         default=0.20,
         ge=0.02,
         le=0.8,
     )
 
 
+class ProductSettings(BaseModel):
+    keogram_enabled: bool = _f(
+        "Build a keogram by appending a meridian column from every saved night frame. "
+        "keogram_realtime.jpg updates live; keogram.jpg is frozen at sunrise.",
+        default=True,
+    )
+    keogram_slice_px: int = _f(
+        "Pixels averaged around the meridian when sampling a keogram column. "
+        "3–7 reduces noise; 1 is a true single-pixel slice.",
+        default=5,
+        ge=1,
+        le=31,
+    )
+    startrails_enabled: bool = _f(
+        "Maximum-stack startrails from night frames that pass the ADU window and minimum star count.",
+        default=True,
+    )
+    startrails_min_stars: int = _f(
+        "Skip a frame for startrails if fewer than this many stellar peaks are found. "
+        "Cloudy or fogged nights stay out of the stack.",
+        default=12,
+        ge=0,
+        le=5000,
+    )
+    startrails_adu_min: float = _f(
+        "Minimum mean ADU (0–1) for a frame to enter the startrail stack. "
+        "Rejects closed-shutter or extremely dark failures.",
+        default=0.03,
+        ge=0.0,
+        le=0.8,
+    )
+    startrails_adu_max: float = _f(
+        "Maximum mean ADU (0–1) for a frame to enter the startrail stack. "
+        "Rejects washed-out moon or twilight frames that would smear the trails.",
+        default=0.42,
+        ge=0.05,
+        le=1.0,
+    )
+    timelapse_enabled: bool = _f(
+        "Encode an H.264 timelapse at sunrise (and on demand from Archive). "
+        "Prefers 12-bit DNG developed with a fixed stretch; falls back to PNG if there is no raw.",
+        default=True,
+    )
+    timelapse_fps: int = _f(
+        "Playback frames per second for the full-night timelapse.",
+        default=24,
+        ge=1,
+        le=60,
+    )
+    timelapse_from_raw: bool = _f(
+        "Develop 12-bit DNG (Bayer demosaic, camera white balance, then your R/G/B sliders) "
+        "and encode that as the timelapse. Off: use the ISP PNG sequence instead.",
+        default=True,
+        title="Timelapse from RAW",
+    )
+    timelapse_bright: float = _f(
+        "Fixed develop brightness for DNG timelapses. Same value for every frame so the video "
+        "does not flicker. 1 is as-shot; 2–4 is typical for night all-sky.",
+        default=2.5,
+        ge=0.5,
+        le=16.0,
+        title="RAW develop brightness",
+    )
+    mini_timelapse_enabled: bool = _f(
+        "Also encode a smaller preview timelapse for the archive page.",
+        default=True,
+    )
+    mini_timelapse_width: int = _f(
+        "Pixel width of the mini timelapse. Height follows the frame aspect ratio.",
+        default=640,
+        ge=160,
+        le=1920,
+    )
+    mini_timelapse_fps: int = _f(
+        "Playback frames per second for the mini timelapse (often a bit faster than the full file).",
+        default=30,
+        ge=1,
+        le=60,
+    )
+    thumb_width: int = _f(
+        "Long-edge size in pixels for archive thumbnails (JPEG, preview only).",
+        default=320,
+        ge=80,
+        le=1280,
+    )
+
+
 class OverlaySettings(BaseModel):
-    enabled: bool = _f("Burn text and cardinals into saved JPEGs (live preview always has a clean option).", default=True)
+    enabled: bool = _f(
+        "Burn text and cardinals into the live preview and thumbs. Raw DNG/PNG archives "
+        "are never overlaid.",
+        default=True,
+    )
     show_exposure: bool = _f("Show shutter time on the overlay.", default=True)
     show_gain: bool = _f("Show analogue gain on the overlay.", default=True)
     show_sun_moon: bool = _f("Show sun and moon altitude.", default=True)
@@ -232,5 +381,6 @@ class ZenithSettings(BaseModel):
         )
     )
     overlay: OverlaySettings = Field(default_factory=OverlaySettings)
+    products: ProductSettings = Field(default_factory=ProductSettings)
 
-    model_config = {"title": "Zenith settings"}
+    model_config = {"title": "Zenith settings", "extra": "ignore"}

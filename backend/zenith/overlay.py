@@ -18,6 +18,7 @@ def apply_overlay(
     gain: float,
     mean: float,
     backend: str,
+    cardinal_offset_deg: float = 0.0,
 ) -> np.ndarray:
     if not overlay.enabled:
         return rgb
@@ -51,7 +52,7 @@ def apply_overlay(
         cx, cy = w / 2, h / 2
         radius = min(w, h) * 0.46
         for label, ang in (("N", -90), ("E", 0), ("S", 90), ("W", 180)):
-            rad = np.deg2rad(ang)
+            rad = np.deg2rad(ang + cardinal_offset_deg)
             px = cx + np.cos(rad) * radius
             py = cy + np.sin(rad) * radius
             draw.text((px - 6, py - 8), label, fill=(251, 191, 36), font=small)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -35,7 +36,7 @@ class CameraBackend(ABC):
     def configure(self, settings: ZenithSettings, exposure_us: int, gain: float, night: bool) -> None: ...
 
     @abstractmethod
-    def capture(self) -> Frame: ...
+    def capture(self, raw_path: Path | None = None) -> Frame: ...
 
     def describe(self) -> dict[str, Any]:
         return {"backend": self.name}

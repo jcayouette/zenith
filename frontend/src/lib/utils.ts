@@ -16,11 +16,28 @@ export type Telemetry = {
   ts: string;
   error: string | null;
   capturing: boolean;
+  session: string;
+  stars: number;
+  saved: boolean;
+  focus: boolean;
+  camera?: boolean;
 };
 
 export function formatExposure(us: number) {
+  return formatShutter(us);
+}
+
+export function formatShutter(us: number) {
   if (!us) return "—";
-  if (us >= 1_000_000) return `${(us / 1_000_000).toFixed(2)} s`;
-  if (us >= 1000) return `${Math.round(us / 1000)} ms`;
-  return `${us} µs`;
+  if (us >= 1_000_000) {
+    const s = us / 1_000_000;
+    return `${s < 10 ? s.toFixed(2) : s.toFixed(1)} s`;
+  }
+  if (us >= 1000) {
+    const ms = us / 1000;
+    if (ms >= 100) return `${Math.round(ms)} ms`;
+    if (ms >= 10) return `${ms.toFixed(1)} ms`;
+    return `${ms.toFixed(2)} ms`;
+  }
+  return `${Math.round(us)} µs`;
 }
