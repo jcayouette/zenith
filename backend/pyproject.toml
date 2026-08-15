@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zenith"
+version = "0.1.0"
+description = "Modern all-sky camera for Raspberry Pi"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.6.0",
+  "pyyaml>=6.0.2",
+  "pillow>=10.4.0",
+  "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+pi = ["picamera2"]
+dev = ["ruff>=0.8.0"]
+
+[project.scripts]
+zenith = "zenith.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zenith*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -1,0 +1,45 @@
+from __future__ import annotations
+
+from threading import Lock
+
+import yaml
+
+from zenith.config.schema import ZenithSettings
+from zenith.paths import CONFIG_PATH, ensure_data_dir
+
+_lock = Lock()
+_cache: ZenithSettings | None = None
+
+
+def load_settings() -> ZenithSettings:
+    global _cache
+    with _lock:
+        if _cache is not None:
+            return _cache
+        ensure_data_dir()
+        if CONFIG_PATH.exists():
+            raw = yaml.safe_load(CONFIG_PATH.read_text()) or {}
+            _cache = ZenithSettings.model_validate(raw)
+        else:
+            _cache = ZenithSettings()
+            _write(_cache)
+        return _cache
+
+
+def save_settings(settings: ZenithSettings) -> ZenithSettings:
+    global _cache
+    with _lock:
+        _cache = settings
+        _write(settings)
+        return _cache
+
+
+def replace_settings(data: dict) -> ZenithSettings:
+    settings = ZenithSettings.model_validate(data)
+    return save_settings(settings)
+
+
+def _write(settings: ZenithSettings) -> None:
+    ensure_data_dir()
+    payload = settings.model_dump(mode="json")
+    CONFIG_PATH.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))

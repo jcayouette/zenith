@@ -1,0 +1,1 @@
+# Keep data/ in git as an empty mount point; contents are gitignored.
