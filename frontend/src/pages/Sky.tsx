@@ -1,6 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
-import SatLayer, { SAT_KIND, SatIcon, satKindOf } from "@/components/SatLayer";
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import AcInspector, { type AcMeta } from "@/components/AcInspector";
+import AcLayer, { type AcPt } from "@/components/AcLayer";
+import LiveFrame from "@/components/LiveFrame";
+import SatInspector, { type Satcat } from "@/components/SatInspector";
+import SatLayer, { satKindOf, type SatLayerHandle } from "@/components/SatLayer";
+import SkyToolbar, { type PanelId, type SkyConfig } from "@/components/SkyToolbar";
 import type { Telemetry } from "@/lib/utils";
 
 type Pt = {
@@ -15,6 +20,7 @@ type Pt = {
   norad?: string;
   kind?: string;
   range_km?: number;
+  object_id?: string;
 };
 
 type Constellation = {
@@ -56,43 +62,7 @@ type SkyPayload = {
   dt?: number;
 };
 
-type LayerKey =
-  | "constellations"
-  | "constellation_names"
-  | "asterisms"
-  | "star_names"
-  | "grid"
-  | "planets"
-  | "satellites";
-
-type SkyConfig = {
-  constellations: boolean;
-  constellation_names: boolean;
-  asterisms: boolean;
-  star_names: boolean;
-  grid: boolean;
-  planets: boolean;
-  satellites: boolean;
-  mag_limit: number;
-  star_name_mag: number;
-  min_sat_alt_deg: number;
-  sat_icon_scale: number;
-  horizon: number;
-  constellation_line_px: number;
-  simulator_catalog: boolean;
-};
-
 type SettingsValues = { sky?: Partial<SkyConfig> };
-
-const LAYER_LABEL: Record<LayerKey, string> = {
-  constellations: "Constellations",
-  constellation_names: "Names",
-  asterisms: "Asterisms",
-  star_names: "Bright stars",
-  grid: "Alt/az grid",
-  planets: "Sun & moon",
-  satellites: "Satellites",
-};
 
 const SKY_DEFAULTS: SkyConfig = {
   constellations: true,
@@ -102,6 +72,7 @@ const SKY_DEFAULTS: SkyConfig = {
   grid: false,
   planets: true,
   satellites: true,
+  aircraft: true,
   mag_limit: 5,
   star_name_mag: 1.85,
   min_sat_alt_deg: 0,
@@ -112,6 +83,8 @@ const SKY_DEFAULTS: SkyConfig = {
 };
 
 const emptyTel = { mode: "—", sun_alt: 0, backend: "—", error: null as string | null, camera: true };
+const MIN_ZOOM = 0.5;
+const MAX_ZOOM = 16;
 
 export default function Sky() {
   const client = useQueryClient();
@@ -121,6 +94,15 @@ export default function Sky() {
   const [liveSats, setLiveSats] = useState<Pt[] | null>(null);
   const [satDt, setSatDt] = useState(1);
   const [selectedSat, setSelectedSat] = useState<string | null>(null);
+  const [selectedAc, setSelectedAc] = useState<string | null>(null);
+  const [liveAc, setLiveAc] = useState<AcPt[] | null>(null);
+  const [acDt, setAcDt] = useState(8);
+  const [acError, setAcError] = useState<string | null>(null);
+  const [acMeta, setAcMeta] = useState<AcMeta | null>(null);
+  const [acMetaLoading, setAcMetaLoading] = useState(false);
+  const satLayerRef = useRef<SatLayerHandle>(null);
+  const [satcat, setSatcat] = useState<Satcat | null>(null);
+  const [satcatLoading, setSatcatLoading] = useState(false);
   const refetchTimer = useRef(0);
   const commitTimer = useRef(0);
   const patchTimer = useRef(0);
@@ -129,6 +111,20 @@ export default function Sky() {
   const reloadAfterPatch = useRef(false);
   const [draftRev, setDraftRev] = useState(0);
   const [satKinds, setSatKinds] = useState<string[] | null>(null);
+  const [panel, setPanel] = useState<PanelId | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [stageSize, setStageSize] = useState({ w: 0, h: 0 });
+  const [fullscreen, setFullscreen] = useState(false);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const zoomRef = useRef(1);
+  const panRef = useRef({ x: 0, y: 0 });
+  const boxRef = useRef({ w: 0, h: 0 });
+  const cssFullRef = useRef(false);
+  zoomRef.current = zoom;
+  panRef.current = pan;
+  boxRef.current = box;
 
   const settingsQuery = useQuery({
     queryKey: ["settings"],
@@ -202,6 +198,151 @@ export default function Sky() {
       window.clearInterval(id);
     };
   }, [cfg.satellites, cfg.min_sat_alt_deg]);
+
+  useEffect(() => {
+    if (!cfg.aircraft) {
+      setLiveAc([]);
+      setAcError(null);
+      return;
+    }
+    let stop = false;
+    async function tick() {
+      try {
+        const res = await fetch("/api/sky/aircraft");
+        if (!res.ok || stop) return;
+        const data = (await res.json()) as { aircraft?: AcPt[]; dt?: number; error?: string | null };
+        if (stop) return;
+        setLiveAc(data.aircraft ?? []);
+        if (data.dt && data.dt > 0) setAcDt(data.dt);
+        setAcError(data.error ?? null);
+      } catch {
+        /* keep last */
+      }
+    }
+    void tick();
+    const id = window.setInterval(() => void tick(), 3000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [cfg.aircraft]);
+
+  useEffect(() => {
+    const onFs = () => setFullscreen(Boolean(document.fullscreenElement) || cssFullRef.current);
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const aspect = (sky?.width || 4) / (sky?.height || 3);
+    const measure = () => {
+      const sw = stage.clientWidth;
+      const sh = stage.clientHeight;
+      if (sw < 8 || sh < 8) return;
+      setStageSize({ w: sw, h: sh });
+      if (sw / sh > aspect) {
+        const h = sh;
+        setBox({ w: h * aspect, h });
+      } else {
+        const w = sw;
+        setBox({ w, h: w / aspect });
+      }
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(stage);
+    return () => ro.disconnect();
+  }, [sky?.width, sky?.height, fullscreen]);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = stage.getBoundingClientRect();
+      zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+    };
+    stage.addEventListener("wheel", onWheel, { passive: false });
+    return () => stage.removeEventListener("wheel", onWheel);
+  }, []);
+
+  function zoomAt(cx: number, cy: number, factor: number) {
+    const stage = stageRef.current;
+    if (!stage) return;
+    const prev = zoomRef.current;
+    const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prev * factor));
+    if (next === prev) return;
+    const { w, h } = boxRef.current;
+    const sw = stage.clientWidth;
+    const sh = stage.clientHeight;
+    const p = panRef.current;
+    const left = (sw - w * prev) / 2 + p.x;
+    const top = (sh - h * prev) / 2 + p.y;
+    const wx = (cx - left) / prev;
+    const wy = (cy - top) / prev;
+    const nx = cx - (sw - w * next) / 2 - wx * next;
+    const ny = cy - (sh - h * next) / 2 - wy * next;
+    zoomRef.current = next;
+    panRef.current = { x: nx, y: ny };
+    setZoom(next);
+    setPan({ x: nx, y: ny });
+  }
+
+  function zoomBy(factor: number) {
+    const stage = stageRef.current;
+    if (!stage) return;
+    zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, factor);
+  }
+
+  function resetView() {
+    zoomRef.current = 1;
+    panRef.current = { x: 0, y: 0 };
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  }
+
+  function shiftPan(dx: number, dy: number) {
+    const next = { x: panRef.current.x + dx, y: panRef.current.y + dy };
+    panRef.current = next;
+    setPan(next);
+  }
+
+  async function toggleFullscreen() {
+    const el = stageRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      cssFullRef.current = false;
+      await document.exitFullscreen().catch(() => undefined);
+      setFullscreen(false);
+      return;
+    }
+    try {
+      await el.requestFullscreen();
+      setFullscreen(true);
+    } catch {
+      cssFullRef.current = !cssFullRef.current;
+      setFullscreen(cssFullRef.current);
+    }
+  }
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "+" || e.key === "=") zoomBy(1.15);
+      if (e.key === "-" || e.key === "_") zoomBy(1 / 1.15);
+      if (e.key === "0") resetView();
+      if (e.key === "f" || e.key === "F") void toggleFullscreen();
+      if (e.key === "Escape") {
+        setPanel(null);
+        setSelectedSat(null);
+        setSelectedAc(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   function queueSkyReload() {
     window.clearTimeout(refetchTimer.current);
@@ -305,15 +446,134 @@ export default function Sky() {
       .sort((a, b) => rank(a.kind) - rank(b.kind) || (b.alt ?? 0) - (a.alt ?? 0))
       .slice(0, 12);
   }, [filteredSats]);
+  const pickedSat = useMemo(
+    () => (selectedSat ? sats.find((s) => (s.norad || s.name) === selectedSat) ?? null : null),
+    [sats, selectedSat],
+  );
+  const planes = liveAc ?? [];
+  const pickedAc = useMemo(
+    () => (selectedAc ? planes.find((p) => (p.id || p.icao24) === selectedAc) ?? null : null),
+    [planes, selectedAc],
+  );
+
+  useEffect(() => {
+    const norad = pickedSat?.norad;
+    if (!selectedSat || !norad) {
+      setSatcat(null);
+      setSatcatLoading(false);
+      return;
+    }
+    const kind = pickedSat?.kind ?? "";
+    const satName = pickedSat?.name ?? "";
+    let stop = false;
+    setSatcatLoading(true);
+    setSatcat(null);
+    const qs = new URLSearchParams();
+    if (kind) qs.set("kind", kind);
+    if (satName) qs.set("name", satName);
+    const query = qs.size ? `?${qs}` : "";
+    void fetch(`/api/sky/satcat/${encodeURIComponent(norad)}${query}`)
+      .then((res) => (res.ok ? res.json() : { norad, error: "No SATCAT record" }))
+      .then((data: Satcat) => {
+        if (!stop) setSatcat(data);
+      })
+      .catch(() => {
+        if (!stop) setSatcat({ norad, error: "Catalog unavailable" });
+      })
+      .finally(() => {
+        if (!stop) setSatcatLoading(false);
+      });
+    return () => {
+      stop = true;
+    };
+  }, [selectedSat, pickedSat?.norad, pickedSat?.kind, pickedSat?.name]);
+
+  useEffect(() => {
+    const icao = pickedAc?.icao24 || pickedAc?.id;
+    if (!selectedAc || !icao) {
+      setAcMeta(null);
+      setAcMetaLoading(false);
+      return;
+    }
+    let stop = false;
+    setAcMetaLoading(true);
+    setAcMeta(null);
+    void fetch(`/api/sky/aircraft/${encodeURIComponent(icao)}`)
+      .then((res) => (res.ok ? res.json() : { icao24: icao, error: "No aircraft type record" }))
+      .then((data: AcMeta) => {
+        if (!stop) setAcMeta(data);
+      })
+      .catch(() => {
+        if (!stop) setAcMeta({ icao24: icao, error: "Type lookup unavailable" });
+      })
+      .finally(() => {
+        if (!stop) setAcMetaLoading(false);
+      });
+    return () => {
+      stop = true;
+    };
+  }, [selectedAc, pickedAc?.icao24, pickedAc?.id]);
+
+  const status = [
+    tel.backend,
+    tel.mode,
+    Number.isFinite(tel.sun_alt) ? `sun ${tel.sun_alt >= 0 ? "+" : ""}${tel.sun_alt.toFixed(1)}°` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const worldW = box.w || stageSize.w;
+  const worldH = box.h || stageSize.h;
+  const scaledW = worldW * zoom;
+  const scaledH = worldH * zoom;
+  const worldLeft = (stageSize.w - scaledW) / 2 + pan.x;
+  const worldTop = (stageSize.h - scaledH) / 2 + pan.y;
+
+  function onGrabPointerDown(e: ReactPointerEvent) {
+    if (e.button !== 0) return;
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const drag = { x: e.clientX, y: e.clientY };
+    function move(ev: PointerEvent) {
+      shiftPan(ev.clientX - drag.x, ev.clientY - drag.y);
+      drag.x = ev.clientX;
+      drag.y = ev.clientY;
+    }
+    function up() {
+      el.releasePointerCapture(e.pointerId);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    }
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
 
   return (
-    <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
-      <section className="frame-glow overflow-hidden rounded-3xl bg-black">
-        <div className="relative">
+    <div
+      ref={stageRef}
+      className={`sky-stage relative overflow-hidden bg-black touch-none ${
+        fullscreen
+          ? `h-full w-full rounded-none ${document.fullscreenElement ? "" : "fixed inset-0 z-50"}`
+          : "aspect-4/3 w-full rounded-3xl frame-glow"
+      }`}
+    >
+      <div
+        className="absolute"
+        style={{
+          left: worldLeft,
+          top: worldTop,
+          width: scaledW || "100%",
+          height: scaledH || "100%",
+        }}
+      >
         {image ? (
-          <img src={image} alt="All-sky with catalog overlay" className="block h-auto w-full bg-black" />
+          <LiveFrame
+            src={image}
+            alt="All-sky with catalog overlay"
+            className="pointer-events-none absolute inset-0 h-full w-full select-none object-fill"
+          />
         ) : (
-          <div className="flex aspect-4/3 items-center justify-center text-white/40">Waiting for live frame…</div>
+          <div className="flex h-full w-full items-center justify-center text-white/40">Waiting for live frame…</div>
         )}
         {sky ? (
           <svg
@@ -459,247 +719,99 @@ export default function Sky() {
             </g>
           </svg>
         ) : null}
-        {sky && cfg.satellites ? (
-          <SatLayer
-            samples={sats}
-            dt={satDt}
-            fit={fit}
-            iconScale={cfg.sat_icon_scale}
-            kinds={satKinds}
-            selectedId={selectedSat}
-            onSelect={setSelectedSat}
-            kindCounts={kindCounts}
-          />
-        ) : null}
-        </div>
-      </section>
-      <aside className="flex flex-col gap-4">
-        <div className="rounded-2xl border border-white/8 bg-panel/80 p-5">
-          <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">Sky</p>
-          <p className="display mt-2 text-3xl text-ice">Catalog overlay</p>
-          <p className="mt-2 text-sm text-white/55">
-            Overlay radius is the fit knob for now. After a real night we can lock it to a star
-            match. Mag limit shows and hides catalog stars, including constellation vertices.
-          </p>
-          <p className="mt-2 text-xs text-white/40">
-            {tel.backend} · {tel.mode}
-            {Number.isFinite(tel.sun_alt) ? ` · sun ${tel.sun_alt >= 0 ? "+" : ""}${tel.sun_alt.toFixed(1)}°` : ""}
-            {` · ${overlayStars.length} stars ≤ ${cfg.mag_limit.toFixed(1)}`}
-            {cfg.satellites ? ` · ${filteredSats.length} sat` : ""}
-            {sky?.tle_count ? ` · ${sky.tle_count} TLE` : ""}
-          </p>
-          {tel.error ? <p className="mt-2 text-sm text-amber-300">{tel.error}</p> : null}
-          {sky?.needs_location ? (
-            <p className="mt-3 text-sm text-amber-200/90">Set latitude and longitude in Settings.</p>
-          ) : null}
-          {sky?.error ? <p className="mt-3 text-sm text-amber-200/90">{sky.error}</p> : null}
-        </div>
-        <div className="rounded-2xl border border-white/8 bg-panel/80 p-5">
-          <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">Layers</p>
-          <ul className="mt-3 space-y-2">
-            {(Object.keys(LAYER_LABEL) as LayerKey[]).map((key) => (
-              <li key={key} className="flex items-center justify-between gap-3">
-                <span className="text-sm text-white/80">{LAYER_LABEL[key]}</span>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={cfg[key]}
-                  onClick={() => void patchSky({ [key]: !cfg[key] })}
-                  className={`relative h-6 w-10 shrink-0 rounded-full transition-colors ${
-                    cfg[key] ? "bg-aurora" : "bg-white/15"
-                  }`}
-                >
-                  <span
-                    className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                      cfg[key] ? "translate-x-4" : "translate-x-0"
-                    }`}
-                  />
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-        {cfg.satellites ? (
-          <div className="rounded-2xl border border-white/8 bg-panel/80 p-5">
-            <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">Satellite types</p>
-            <div className="mt-3 flex flex-col gap-2">
-              <button
-                type="button"
-                aria-pressed={satKinds === null}
-                onClick={() => setSatKinds(null)}
-                className={`rounded-lg px-3 py-1.5 text-left text-xs font-medium transition-colors ${
-                  satKinds === null
-                    ? "bg-aurora/90 text-slate-950"
-                    : "bg-white/8 text-white/70 hover:bg-white/12"
-                }`}
-              >
-                All types
-                <span className="ml-2 text-[10px] opacity-70">{sats.length}</span>
-              </button>
-              <ul className="grid grid-cols-2 gap-2">
-                {Object.entries(SAT_KIND).map(([id, meta]) => {
-                  const on = satKinds === null || satKinds.includes(id);
-                  const isolated = satKinds?.length === 1 && satKinds[0] === id;
-                  const count = kindCounts[id] ?? 0;
-                  return (
-                    <li key={id}>
-                      <button
-                        type="button"
-                        aria-pressed={satKinds !== null && satKinds.includes(id)}
-                        onClick={() => {
-                          if (satKinds === null) {
-                            setSatKinds([id]);
-                            return;
-                          }
-                          const next = satKinds.includes(id)
-                            ? satKinds.filter((k) => k !== id)
-                            : [...satKinds, id];
-                          setSatKinds(next.length === 0 || next.length === Object.keys(SAT_KIND).length ? null : next);
-                        }}
-                        className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors ${
-                          on ? "bg-white/10 text-white/90" : "text-white/35 hover:bg-white/6 hover:text-white/55"
-                        } ${isolated ? "ring-1 ring-white/25" : ""}`}
-                      >
-                        <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center" style={{ opacity: on ? 1 : 0.35 }}>
-                          <SatIcon color={meta.color} />
-                        </span>
-                        <span className="min-w-0 flex-1 truncate">{meta.label}</span>
-                        <span className="tabular-nums text-[10px] text-white/40">{count}</span>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          </div>
-        ) : null}
-        <div className="rounded-2xl border border-white/8 bg-panel/80 p-5">
-          <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">Fit</p>
-          <div className="mt-3 space-y-4">
-            <Slider
-              label="Overlay radius"
-              hint="Shrink until the stick figures sit inside the lens circle."
-              value={cfg.horizon}
-              min={0.4}
-              max={1.5}
-              step={0.01}
-              format={(v) => v.toFixed(2)}
-              onChange={(v) => patchSky({ horizon: v })}
-              onCommit={commitSlider}
-            />
-            <Slider
-              label="Line thickness"
-              value={cfg.constellation_line_px}
-              min={0.5}
-              max={6}
-              step={0.5}
-              format={(v) => `${v.toFixed(1)} px`}
-              onChange={(v) => patchSky({ constellation_line_px: v })}
-              onCommit={commitSlider}
-            />
-            <Slider
-              label="Star name mag"
-              hint="Label named stars at or brighter than this (lower = fewer names)."
-              value={cfg.star_name_mag}
-              min={0}
-              max={6}
-              step={0.05}
-              format={(v) => v.toFixed(2)}
-              onChange={(v) => patchSky({ star_name_mag: v })}
-              onCommit={commitSlider}
-            />
-            <Slider
-              label="Mag limit"
-              hint="Faintest overlay stars and constellation vertices. 5 is a dark-site sky."
-              value={cfg.mag_limit}
-              min={1}
-              max={6}
-              step={0.1}
-              format={(v) => v.toFixed(1)}
-              onChange={(v) => patchSky({ mag_limit: v })}
-              onCommit={commitSlider}
-            />
-            <Slider
-              label="Satellite icon size"
-              value={cfg.sat_icon_scale}
-              min={0.4}
-              max={4}
-              step={0.1}
-              format={(v) => `${v.toFixed(1)}×`}
-              onChange={(v) => patchSky({ sat_icon_scale: v })}
-              onCommit={commitSlider}
-            />
-            <Slider
-              label="Min sat altitude"
-              hint="0° is Stellarium-style: every catalog object above the horizon. Raise it to hide the crowded limb."
-              value={cfg.min_sat_alt_deg}
-              min={0}
-              max={70}
-              step={1}
-              format={(v) => `${v.toFixed(0)}°`}
-              onChange={(v) => patchSky({ min_sat_alt_deg: v }, true)}
-              onCommit={commitSlider}
-            />
-          </div>
-        </div>
-        <div className="rounded-2xl border border-white/8 bg-panel/80 p-5">
-          <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">Now</p>
-          {cfg.satellites && filteredSats.length ? (
-            <ul className="mt-3 space-y-2 text-sm">
-              {nowList.map((s) => {
-                const color = SAT_KIND[s.kind && SAT_KIND[s.kind] ? s.kind : "other"].color;
-                return (
-                <li key={s.norad || s.name}>
-                  <button
-                    type="button"
-                    className={`flex w-full items-baseline justify-between gap-3 rounded-lg px-1 py-0.5 text-left ${
-                      selectedSat === (s.norad || s.name) ? "bg-white/10" : "hover:bg-white/5"
-                    }`}
-                    onClick={() => setSelectedSat(s.norad || s.name || null)}
-                  >
-                    <span className="font-medium" style={{ color }}>
-                      {s.name}
-                    </span>
-                    <span className="text-xs text-white/45">
-                      {s.kind && SAT_KIND[s.kind] ? `${SAT_KIND[s.kind].label} · ` : ""}
-                      {s.alt != null ? `${s.alt.toFixed(0)}°` : ""}
-                      {s.az != null ? ` · az ${s.az.toFixed(0)}°` : ""}
-                    </span>
-                  </button>
-                </li>
-                );
-              })}
-            </ul>
-          ) : (
-            <p className="mt-3 text-sm text-white/45">
-              {cfg.satellites
-                ? satKinds
-                  ? "No satellites of the selected types above the altitude cut."
-                  : `None above ${cfg.min_sat_alt_deg.toFixed(0)}° right now. ISS and Hubble still show in the 24 h list when a pass is due.`
-                : "Satellite layer is off."}
-            </p>
-          )}
-        </div>
-        <div className="rounded-2xl border border-white/8 bg-panel/80 p-5">
-          <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">Passes (24 h)</p>
-          {sky?.passes?.length ? (
-            <ul className="mt-3 space-y-3 text-sm">
-              {sky.passes.map((p) => (
-                <li key={`${p.name}-${p.start}`}>
-                  <p className="text-white/90">{p.name}</p>
-                  <p className="text-xs text-white/45">
-                    {fmtPass(p.start)} → {fmtPass(p.end)} · max {p.max_alt.toFixed(0)}°
-                  </p>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="mt-3 text-sm text-white/45">
-              No ISS / CSS / Hubble passes above the altitude cut in the next 24 hours.
-            </p>
-          )}
-        </div>
-      </aside>
+        {sky && (cfg.satellites || cfg.aircraft) ? (
+          <>
+            {cfg.satellites ? (
+              <SatLayer
+                ref={satLayerRef}
+                samples={sats}
+                dt={satDt}
+                fit={fit}
+                iconScale={cfg.sat_icon_scale}
+                kinds={satKinds}
+                selectedId={selectedSat}
+                onSelect={(id) => {
+                  setSelectedSat(id);
+                  if (id) setSelectedAc(null);
+                }}
+                onPan={shiftPan}
+                viewZoom={zoom}
+                interactive={!cfg.aircraft}
+              />
+            ) : null}
+            {cfg.aircraft ? (
+              <AcLayer
+                samples={planes}
+                dt={acDt}
+                fit={fit}
+                iconScale={cfg.sat_icon_scale}
+                selectedId={selectedAc}
+                onSelect={(id) => {
+                  setSelectedAc(id);
+                  if (id) setSelectedSat(null);
+                }}
+                onMiss={(x, y) => {
+                  if (cfg.satellites) satLayerRef.current?.hitAt(x, y);
+                }}
+                onPan={shiftPan}
+                viewZoom={zoom}
+              />
+            ) : null}
+          </>
+        ) : (
+          <div className="absolute inset-0 cursor-grab touch-none active:cursor-grabbing" onPointerDown={onGrabPointerDown} />
+        )}
+      </div>
+      <SkyToolbar
+        cfg={cfg}
+        panel={panel}
+        onPanel={setPanel}
+        zoom={zoom}
+        fullscreen={fullscreen}
+        satCount={filteredSats.length}
+        acCount={planes.length}
+        starCount={overlayStars.length}
+        tleCount={sky?.tle_count}
+        satKinds={satKinds}
+        kindCounts={kindCounts}
+        satsTotal={sats.length}
+        nowList={nowList}
+        selectedSat={selectedSat}
+        passes={sky?.passes ?? []}
+        status={status}
+        onToggleLayer={(key) => void patchSky({ [key]: !cfg[key] })}
+        onSatKinds={setSatKinds}
+        onSelectSat={setSelectedSat}
+        onPatch={patchSky}
+        onCommitSlider={commitSlider}
+        onZoomIn={() => zoomBy(1.2)}
+        onZoomOut={() => zoomBy(1 / 1.2)}
+        onResetView={resetView}
+        onFullscreen={() => void toggleFullscreen()}
+      />
+      {pickedAc ? (
+        <AcInspector
+          ac={pickedAc}
+          meta={acMeta}
+          loading={acMetaLoading}
+          onClose={() => setSelectedAc(null)}
+        />
+      ) : pickedSat ? (
+        <SatInspector
+          sat={pickedSat}
+          satcat={satcat}
+          loading={satcatLoading}
+          onClose={() => setSelectedSat(null)}
+        />
+      ) : null}
+      {tel.error || sky?.error || sky?.needs_location || acError ? (
+        <p className="pointer-events-none absolute right-3 bottom-3 z-10 max-w-sm rounded-xl bg-slate-950/80 px-3 py-2 text-xs text-amber-200/90">
+          {sky?.needs_location ? "Set latitude and longitude in Settings. " : ""}
+          {tel.error ?? ""}
+          {sky?.error ? ` ${sky.error}` : ""}
+          {acError ? ` ${acError}` : ""}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -755,50 +867,3 @@ function gridDegreeLabel(g: {
   return null;
 }
 
-function Slider({
-  label,
-  hint,
-  value,
-  min,
-  max,
-  step,
-  format,
-  onChange,
-  onCommit,
-}: {
-  label: string;
-  hint?: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  format: (v: number) => string;
-  onChange: (v: number) => void;
-  onCommit?: () => void;
-}) {
-  return (
-    <label className="block">
-      <span className="flex items-center justify-between text-sm text-white/80">
-        {label}
-        <span className="text-xs text-white/45">{format(value)}</span>
-      </span>
-      {hint ? <span className="mt-0.5 block text-xs text-white/35">{hint}</span> : null}
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        onPointerUp={onCommit}
-        onKeyUp={onCommit}
-        className="mt-2 w-full accent-aurora"
-      />
-    </label>
-  );
-}
-
-function fmtPass(iso: string) {
-  const t = iso.replace("T", " ");
-  return t.slice(0, 16);
-}

@@ -381,6 +381,13 @@ class SkySettings(BaseModel):
         "Track Celestrak satellites on the Sky page (stations, visual, Starlink, GNSS, …).",
         default=True,
     )
+    aircraft: bool = _f(
+        "Radar-style ADS-B overlay from OpenSky: aircraft now within 50 km, plus inbound "
+        "flights whose track will pass within 50 km. Green horizon dots mark where they "
+        "are coming from. Optional OPENSKY_USERNAME / OPENSKY_PASSWORD raise the rate limit.",
+        default=True,
+        title="Aircraft",
+    )
     mag_limit: float = _f(
         "Faintest catalog stars drawn on the Sky overlay (and painted by the simulator). "
         "Constellation and asterism lines only connect stars at or brighter than this.",

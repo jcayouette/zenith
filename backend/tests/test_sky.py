@@ -8,7 +8,7 @@ import numpy as np
 from zenith.config.schema import ZenithSettings
 from zenith.imaging import orient
 from zenith.sky.catalog import load_asterisms, load_constellations, load_stars, mag_at
-from zenith.sky.tle import classify_sat, display_name, norad_id, parse_tles
+from zenith.sky.tle import classify_sat, display_name, intl_designator, norad_id, parse_tles
 from zenith.sky.coords import eq_to_altaz, lst_deg
 from zenith.sky.layers import build_sky
 from zenith.sky.project import altaz_to_xy, inverse_orient_xy, orient_xy
@@ -145,6 +145,7 @@ class TleTests(unittest.TestCase):
         l1 = "1 25544U 98067A   26228.18012382  .00004999  00000+0  97292-4 0  9998"
         self.assertEqual(norad_id(l1), "25544")
         self.assertEqual(display_name("ISS (ZARYA)", l1), "ISS")
+        self.assertEqual(intl_designator(l1), "1998-067A")
         self.assertIsNone(display_name("FREGAT DEB", "1 49271U 11037PF  26228.29031530  .00012011  00000+0  18802-1 0  9992"))
 
     def test_parse_three_line_tles(self):
@@ -172,6 +173,219 @@ class TleTests(unittest.TestCase):
         self.assertEqual(classify_sat("NAVSTAR 81", "gps-ops"), "gnss")
         self.assertEqual(classify_sat("KUIPER-1", "kuiper"), "kuiper")
         self.assertEqual(classify_sat("FLOCK 4Y-1", "planet"), "planet")
+
+
+class SatcatTests(unittest.TestCase):
+    def test_rejects_empty_norad(self):
+        from zenith.sky.satcat import lookup_satcat
+
+        self.assertIsNone(lookup_satcat(""))
+        self.assertIsNone(lookup_satcat("abc"))
+
+    def test_launch_site_names(self):
+        from zenith.sky.satcat import SITE_NAME
+
+        self.assertEqual(SITE_NAME["AFETR"], "Cape Canaveral")
+        self.assertEqual(SITE_NAME["TTMTR"], "Baikonur")
+        self.assertEqual(SITE_NAME["TYMSC"], "Baikonur")
+        self.assertEqual(SITE_NAME["FRGUI"], "Guiana Space Centre")
+
+    def test_describe_known_and_kinds(self):
+        from zenith.sky.satcat import describe_sat
+
+        self.assertIn("International Space Station", describe_sat(norad="25544", kind="station"))
+        self.assertIn("Starlink", describe_sat(name="STARLINK-1234", kind="starlink"))
+        self.assertIn("debris", describe_sat(name="FENGYUN 1C DEB", object_type="DEB").lower())
+        self.assertIn("rocket", describe_sat(name="SL-4 R/B", object_type="R/B").lower())
+        self.assertIn("Navigation", describe_sat(kind="gnss"))
+
+
+class AircraftTests(unittest.TestCase):
+    def test_overhead_is_near_zenith(self):
+        from zenith.sky.aircraft import look_azel_geodetic
+
+        az, el, rng = look_azel_geodetic(49.6314, 10.8772, 11000, 49.6314, 10.8772, 296)
+        self.assertGreater(el, 85)
+        self.assertLess(rng, 12)
+
+    def test_due_north_azimuth(self):
+        from zenith.sky.aircraft import look_azel_geodetic
+
+        az, el, _rng = look_azel_geodetic(49.9, 10.8772, 11000, 49.6314, 10.8772, 296)
+        self.assertLess(min(az, 360 - az), 8)
+        self.assertGreater(el, 15)
+
+    def test_bbox_covers_horizon(self):
+        from zenith.sky.aircraft import bbox_for_site
+
+        lamin, lomin, lamax, lomax = bbox_for_site(49.6314, 10.8772)
+        self.assertLess(lamin, 49.6314)
+        self.assertGreater(lamax, 49.6314)
+        self.assertGreater(lamax - lamin, 6)
+
+    def test_inbound_southbound_has_small_cpa(self):
+        from zenith.sky.aircraft import closest_approach
+
+        lat = 49.6314 + 100 / 111.32
+        cpa, tca, horiz = closest_approach(lat, 10.8772, 180, 250, 49.6314, 10.8772)
+        self.assertAlmostEqual(horiz, 100, delta=2)
+        self.assertLess(cpa, 4)
+        self.assertGreater(tca, 350)
+        self.assertLess(tca, 450)
+
+    def test_eastbound_parallel_has_large_cpa(self):
+        from zenith.sky.aircraft import closest_approach
+
+        lat = 49.6314 + 100 / 111.32
+        cpa, _tca, _horiz = closest_approach(lat, 10.8772, 90, 250, 49.6314, 10.8772)
+        self.assertGreater(cpa, 90)
+
+    def test_project_skips_grounded(self):
+        from zenith.sky.aircraft import _project
+
+        now = datetime(2026, 8, 16, 18, 0, tzinfo=timezone.utc).timestamp()
+        states = [
+            [
+                "abc123",
+                "DLH123  ",
+                "Germany",
+                now,
+                now,
+                10.8772,
+                49.6314,
+                11000,
+                False,
+                220,
+                90,
+                0,
+                None,
+                11000,
+                "1000",
+                False,
+                0,
+                3,
+            ],
+            [
+                "gnd001",
+                "TAXI",
+                "Germany",
+                now,
+                now,
+                10.88,
+                49.63,
+                0,
+                True,
+                5,
+                0,
+                0,
+                None,
+                0,
+                None,
+                False,
+                0,
+                1,
+            ],
+        ]
+        planes = _project(states, 49.6314, 10.8772, 296, now, width=720, height=720, north_angle_deg=0, horizon=1.0, flip_h=False, flip_v=False, rotation_deg=0)
+        self.assertEqual(len(planes), 1)
+        self.assertEqual(planes[0]["name"], "DLH123")
+        self.assertGreater(planes[0]["alt"], 80)
+
+    def test_project_keeps_inbound_and_drops_parallel(self):
+        from zenith.sky.aircraft import _project
+
+        now = datetime(2026, 8, 16, 18, 0, tzinfo=timezone.utc).timestamp()
+        lat_n = 49.6314 + 80 / 111.32
+        inbound = [
+            "inb001",
+            "INB01",
+            "Germany",
+            now,
+            now,
+            10.8772,
+            lat_n,
+            11000,
+            False,
+            250,
+            180,
+            0,
+            None,
+            11000,
+            None,
+            False,
+            0,
+            3,
+        ]
+        parallel = list(inbound)
+        parallel[0] = "par001"
+        parallel[1] = "PAR01"
+        parallel[10] = 90
+        planes = _project(
+            [inbound, parallel],
+            49.6314,
+            10.8772,
+            296,
+            now,
+            width=720,
+            height=720,
+            north_angle_deg=0,
+            horizon=1.0,
+            flip_h=False,
+            flip_v=False,
+            rotation_deg=0,
+        )
+        names = {p["name"] for p in planes}
+        self.assertIn("INB01", names)
+        self.assertNotIn("PAR01", names)
+        row = next(p for p in planes if p["name"] == "INB01")
+        self.assertTrue(row["inbound"])
+        self.assertIn("from_x", row)
+        self.assertGreater(len(row.get("path") or []), 2)
+
+
+class AcmetaTests(unittest.TestCase):
+    def test_rejects_bad_icao(self):
+        from zenith.sky.acmeta import lookup_aircraft
+
+        self.assertIsNone(lookup_aircraft(""))
+        self.assertIsNone(lookup_aircraft("xyz"))
+
+    def test_parse_adsbdb_boeing(self):
+        from zenith.sky.acmeta import parse_adsbdb
+
+        payload = {
+            "response": {
+                "aircraft": {
+                    "type": "737MAX 8 200",
+                    "icao_type": "B38M",
+                    "manufacturer": "Boeing",
+                    "registration": "EI-HGV",
+                    "registered_owner": "Ryanair",
+                }
+            }
+        }
+        row = parse_adsbdb(payload, "4cad54")
+        self.assertEqual(row["typecode"], "B38M")
+        self.assertEqual(row["registration"], "EI-HGV")
+        self.assertEqual(row["operator"], "Ryanair")
+        self.assertIn("Boeing", row["label"])
+
+    def test_parse_hexdb(self):
+        from zenith.sky.acmeta import parse_hexdb
+
+        row = parse_hexdb(
+            {
+                "ModeS": "4CAD54",
+                "Registration": "EI-HGV",
+                "Manufacturer": "Boeing",
+                "ICAOTypeCode": "B38M",
+                "Type": "737MAX 8 200",
+                "RegisteredOwners": "Ryanair",
+            },
+            "4cad54",
+        )
+        self.assertEqual(row["typecode"], "B38M")
+        self.assertEqual(row["model"], "737MAX 8 200")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
 
 export type SatPt = {
   x: number;
@@ -11,6 +11,7 @@ export type SatPt = {
   norad?: string;
   kind?: string;
   range_km?: number;
+  object_id?: string;
 };
 
 export const SAT_KIND: Record<string, { label: string; color: string }> = {
@@ -61,35 +62,49 @@ type Props = {
   kinds: string[] | null;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
-  kindCounts: Record<string, number>;
+  onPan?: (dx: number, dy: number) => void;
+  viewZoom?: number;
+  interactive?: boolean;
+};
+
+export type SatLayerHandle = {
+  hitAt: (clientX: number, clientY: number) => void;
 };
 
 const STALE_MS = 1600;
 
-export default function SatLayer({
-  samples,
-  dt,
-  fit,
-  iconScale,
-  kinds,
-  selectedId,
-  onSelect,
-  kindCounts,
-}: Props) {
+const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
+  {
+    samples,
+    dt,
+    fit,
+    iconScale,
+    kinds,
+    selectedId,
+    onSelect,
+    onPan,
+    viewZoom = 1,
+    interactive = true,
+  },
+  ref,
+) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const onPanRef = useRef(onPan);
+  onPanRef.current = onPan;
   const tracksRef = useRef(new Map<string, Track>());
   const dtRef = useRef(dt);
   const fitRef = useRef(fit);
   const scaleRef = useRef(iconScale);
+  const zoomRef = useRef(viewZoom);
   const kindsRef = useRef(kinds);
   const selectedRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
-  const [picked, setPicked] = useState<Track | null>(null);
-  const [panel, setPanel] = useState<{ x: number; y: number } | null>(null);
 
   dtRef.current = dt;
   fitRef.current = fit;
   scaleRef.current = iconScale;
+  zoomRef.current = viewZoom;
   kindsRef.current = kinds;
   selectedRef.current = selectedId;
   onSelectRef.current = onSelect;
@@ -99,24 +114,9 @@ export default function SatLayer({
   }, [samples, dt]);
 
   useEffect(() => {
-    if (!selectedId) {
-      setPicked(null);
-      setPanel(null);
-      return;
-    }
-    const track = tracksRef.current.get(selectedId);
-    if (track) {
-      setPicked({ ...track });
-      setPanel((pos) => pos ?? { x: 12, y: 12 });
-    }
-  }, [selectedId, samples]);
-
-  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       onSelectRef.current(null);
-      setPicked(null);
-      setPanel(null);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -134,9 +134,12 @@ export default function SatLayer({
     const resize = () => {
       const w = wrap.clientWidth;
       const h = wrap.clientHeight;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.max(1, Math.round(w * dpr));
-      canvas.height = Math.max(1, Math.round(h * dpr));
+      const dpr = Math.min(window.devicePixelRatio || 1, 2, 4096 / Math.max(w, 1), 4096 / Math.max(h, 1));
+      const bw = Math.max(1, Math.round(w * dpr));
+      const bh = Math.max(1, Math.round(h * dpr));
+      if (canvas.width === bw && canvas.height === bh) return;
+      canvas.width = bw;
+      canvas.height = bh;
       canvas.style.width = `${w}px`;
       canvas.style.height = `${h}px`;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -163,7 +166,7 @@ export default function SatLayer({
         if (px < -8 || py < -8 || px > w + 8 || py > h + 8) continue;
         const mega = track.kind === "starlink" || track.kind === "oneweb";
         const color = SAT_KIND[track.kind]?.color ?? SAT_KIND.other.color;
-        const size = emojiSize(mega, track.kind === "station", icon);
+        const size = emojiSize(mega, track.kind === "station", icon) * Math.min(1.85, Math.max(1, Math.sqrt(zoomRef.current)));
         const sprite = tintedSatSprite(color, size);
         if (track.id === selected) {
           ctx.strokeStyle = "rgba(255,255,255,0.85)";
@@ -196,14 +199,17 @@ export default function SatLayer({
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const px = clientX - rect.left;
-    const py = clientY - rect.top;
-    const [ox, oy] = pixelToOverlay(px, py, fitRef.current, rect.width, rect.height);
+    if (rect.width < 1 || rect.height < 1) return;
+    const layoutW = canvas.clientWidth || rect.width;
+    const layoutH = canvas.clientHeight || rect.height;
+    const px = ((clientX - rect.left) / rect.width) * layoutW;
+    const py = ((clientY - rect.top) / rect.height) * layoutH;
+    const [ox, oy] = pixelToOverlay(px, py, fitRef.current, layoutW, layoutH);
     const allow = kindsRef.current ? new Set(kindsRef.current) : null;
     const now = performance.now();
     const maxAge = Math.max(dtRef.current * 1.6, 1.2);
     let best: Track | null = null;
-    let bestD = 18 / Math.min(rect.width, rect.height);
+    let bestD = 18 / Math.min(layoutW, layoutH);
     for (const track of tracksRef.current.values()) {
       if (allow && !allow.has(track.kind)) continue;
       const age = Math.min((now - track.t0) / 1000, maxAge);
@@ -218,78 +224,53 @@ export default function SatLayer({
     }
     if (!best) {
       onSelectRef.current(null);
-      setPicked(null);
-      setPanel(null);
       return;
     }
     onSelectRef.current(best.id);
-    setPicked(best);
-    setPanel({
-      x: Math.min(px + 12, rect.width - 240),
-      y: Math.min(py + 12, rect.height - 220),
-    });
   }
 
-  return (
-    <>
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 h-full w-full cursor-pointer"
-        onClick={(e) => hitTest(e.clientX, e.clientY)}
-      />
-      {picked && panel ? (
-        <aside
-          className="absolute z-10 w-56 rounded-xl border border-white/12 bg-slate-950/92 p-3 shadow-xl backdrop-blur-sm"
-          style={{ left: panel.x, top: panel.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="flex items-start justify-between gap-2">
-            <p className="text-sm font-semibold leading-tight" style={{ color: SAT_KIND[picked.kind]?.color }}>
-              {picked.name}
-            </p>
-            <button
-              type="button"
-              className="rounded px-1 text-xs text-white/45 hover:text-white"
-              onClick={() => {
-                onSelect(null);
-                setPicked(null);
-                setPanel(null);
-              }}
-              aria-label="Close"
-            >
-              ×
-            </button>
-          </div>
-          <dl className="mt-2 space-y-1 text-[11px] text-white/70">
-            <Row label="Type" value={SAT_KIND[picked.kind]?.label ?? picked.kind} />
-            <Row label="NORAD" value={picked.norad || "—"} />
-            <Row label="Alt" value={`${picked.alt.toFixed(1)}°`} />
-            <Row label="Az" value={`${picked.az.toFixed(1)}°`} />
-            {picked.range_km != null ? <Row label="Range" value={`${fmtKm(picked.range_km)} km`} /> : null}
-          </dl>
-          <p className="mt-3 text-[10px] uppercase tracking-[0.18em] text-white/35">Visible now</p>
-          <ul className="mt-1.5 grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px] text-white/55">
-            {Object.entries(SAT_KIND).map(([id, meta]) => (
-              <li key={id} className="flex justify-between gap-2">
-                <span>{meta.label}</span>
-                <span className="tabular-nums text-white/75">{kindCounts[id] ?? 0}</span>
-              </li>
-            ))}
-          </ul>
-        </aside>
-      ) : null}
-    </>
-  );
-}
+  useImperativeHandle(ref, () => ({
+    hitAt(clientX: number, clientY: number) {
+      hitTest(clientX, clientY);
+    },
+  }));
 
-function Row({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex justify-between gap-3">
-      <dt className="text-white/40">{label}</dt>
-      <dd className="tabular-nums text-white/85">{value}</dd>
-    </div>
+    <canvas
+      ref={canvasRef}
+      className={`absolute inset-0 h-full w-full touch-none ${
+        interactive ? "cursor-grab active:cursor-grabbing" : "pointer-events-none"
+      }`}
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        dragRef.current = { x: e.clientX, y: e.clientY, moved: false };
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        const drag = dragRef.current;
+        if (!drag) return;
+        const dx = e.clientX - drag.x;
+        const dy = e.clientY - drag.y;
+        if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+        drag.moved = true;
+        drag.x = e.clientX;
+        drag.y = e.clientY;
+        onPanRef.current?.(dx, dy);
+      }}
+      onPointerUp={(e) => {
+        const drag = dragRef.current;
+        dragRef.current = null;
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        if (!drag?.moved) hitTest(e.clientX, e.clientY);
+      }}
+      onPointerCancel={() => {
+        dragRef.current = null;
+      }}
+    />
   );
-}
+});
+
+export default SatLayer;
 
 function ingest(samples: SatPt[], dt: number, now: number, prev: Map<string, Track>): Map<string, Track> {
   const next = new Map<string, Track>();
@@ -378,10 +359,6 @@ function tintedSatSprite(color: string, size: number): HTMLCanvasElement {
   ctx.putImageData(img, 0, 0);
   spriteCache.set(key, canvas);
   return canvas;
-}
-
-function fmtKm(km: number) {
-  return km >= 1000 ? km.toFixed(0) : km.toFixed(1);
 }
 
 export function SatIcon({ color }: { color: string }) {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import LiveAdjust from "@/components/LiveAdjust";
+import LiveFrame from "@/components/LiveFrame";
 import { formatShutter, type Telemetry } from "@/lib/utils";
 
 const empty: Telemetry = {
@@ -126,7 +127,7 @@ export default function Live() {
     <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
       <section className="frame-glow relative overflow-hidden rounded-3xl bg-black">
         {image ? (
-          <img src={image} alt="Live all-sky" className="block w-full bg-black object-contain" />
+          <LiveFrame src={image} alt="Live all-sky" className="block w-full bg-black object-contain" />
         ) : (
           <div className="flex aspect-4/3 items-center justify-center text-white/40">
             Waiting for first frame…

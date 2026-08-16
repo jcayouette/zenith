@@ -27,7 +27,7 @@ const GROUP_COPY: Record<string, string> = {
   day: "Exposure while the sun is up.",
   night: "Exposure after night begins.",
   overlay: "Text on the live JPEG and thumbs. Raw stays clean.",
-  sky: "Constellations, named stars, and satellites on the Sky page. Same projection as the simulator.",
+  sky: "Constellations, named stars, satellites, and an ADS-B radar overlay (inbound within 50 km) on the Sky page.",
   products: "Keograms, startrails, and timelapses.",
 };
 

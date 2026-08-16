@@ -160,6 +160,15 @@ def norad_id(line1: str) -> str:
     return line1[2:7].strip()
 
 
+def intl_designator(line1: str) -> str | None:
+    raw = line1[9:17].strip()
+    if len(raw) < 5 or not raw[:2].isdigit():
+        return None
+    yy = int(raw[:2])
+    year = 1900 + yy if yy >= 57 else 2000 + yy
+    return f"{year}-{raw[2:]}"
+
+
 def classify_sat(name: str, group: str = "visual") -> str:
     kind = GROUP_KIND.get(group, "other")
     upper = name.upper()

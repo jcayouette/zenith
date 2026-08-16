@@ -21,7 +21,7 @@ const links = [
 export default function App() {
   return (
     <div className="sky-bg min-h-screen">
-      <header className="sticky top-0 z-20 border-b border-white/8 bg-[#070b14]/80 backdrop-blur-md">
+      <header className="sticky top-0 z-40 border-b border-white/8 bg-[#070b14]/80 backdrop-blur-md">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-6 px-6 py-4">
           <div className="flex items-baseline gap-3">
             <span className="display text-2xl text-ice">Zenith</span>

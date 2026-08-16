@@ -12,7 +12,7 @@ from zenith.sky.coords import eq_to_altaz, lst_deg
 from zenith.sky.moon import moon_altaz
 from zenith.sky.project import altaz_to_xy
 from zenith.sky.sun import sun_altitude_deg, sun_azimuth_deg
-from zenith.sky.tle import PREFERRED_NORAD, look_azel_batch, overlay_catalog, upcoming_passes, _propagation_set
+from zenith.sky.tle import PREFERRED_NORAD, intl_designator, look_azel_batch, overlay_catalog, upcoming_passes, _propagation_set
 
 # Overlay geometry is always projected at this fill; the Sky page scales it to the
 # user's overlay-radius slider so stars, grid, and satellites stay locked together.
@@ -62,6 +62,7 @@ def build_sky(
             "grid": sky.grid,
             "planets": sky.planets,
             "satellites": sky.satellites,
+            "aircraft": sky.aircraft,
         },
         "horizon": float(sky.horizon),
         "projected_horizon": OVERLAY_BAKE_HORIZON,
@@ -362,6 +363,9 @@ def _project_sats(
         pt["name"] = name
         pt["norad"] = norad
         pt["kind"] = kind
+        des = intl_designator(_l1)
+        if des:
+            pt["object_id"] = des
         if nxt_ok[i] and nvis[i]:
             pt["x2"] = round(float(nxs[i]) / (proj["width"] or 1), 5)
             pt["y2"] = round(float(nys[i]) / (proj["height"] or 1), 5)

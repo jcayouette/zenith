@@ -8,7 +8,10 @@ from fastapi import APIRouter, Query, Request
 from PIL import Image
 
 from zenith.config.store import load_settings
+from zenith.sky.acmeta import lookup_aircraft
+from zenith.sky.aircraft import build_aircraft
 from zenith.sky.layers import build_sats, build_sky
+from zenith.sky.satcat import describe_sat, lookup_satcat
 from zenith.sky.tle import refresh_tles
 
 router = APIRouter(tags=["sky"])
@@ -70,6 +73,49 @@ def sky_sats(
     settings = load_settings()
     width, height = _frame_size(request)
     return build_sats(settings, width=width, height=height, horizon=horizon)
+
+
+@router.get("/sky/aircraft")
+def sky_aircraft(request: Request):
+    """OpenSky ADS-B positions above the site horizon (~10 s cache)."""
+    settings = load_settings()
+    if not settings.sky.aircraft:
+        return {"aircraft": [], "dt": 8.0, "count": 0, "error": None}
+    if settings.location.latitude == 0 and settings.location.longitude == 0:
+        return {"aircraft": [], "dt": 8.0, "count": 0, "error": "Set latitude and longitude in Settings."}
+    width, height = _frame_size(request)
+    return build_aircraft(settings, width=width, height=height)
+
+
+@router.get("/sky/aircraft/{icao24}")
+def sky_aircraft_meta(icao24: str):
+    """Type, registration, and operator for one ICAO24 (adsbdb / hexdb)."""
+    row = lookup_aircraft(icao24)
+    if not row:
+        return {"icao24": icao24, "error": "No aircraft type record"}
+    return row
+
+
+@router.get("/sky/satcat/{norad}")
+def sky_satcat(
+    norad: str,
+    kind: str | None = Query(default=None),
+    name: str | None = Query(default=None),
+):
+    """Launch site, date, catalog fields, and a short purpose line for one NORAD id."""
+    row = lookup_satcat(norad)
+    if not row:
+        row = {"norad": norad, "error": "No SATCAT record"}
+    row = {
+        **row,
+        "summary": describe_sat(
+            norad=norad,
+            name=name or row.get("name"),
+            kind=kind,
+            object_type=row.get("object_type"),
+        ),
+    }
+    return row
 
 
 def _parse_at(raw: str | None) -> datetime:
