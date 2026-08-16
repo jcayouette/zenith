@@ -34,6 +34,22 @@ class SunTests(unittest.TestCase):
         self.assertEqual(session.date.isoformat(), "2026-08-15")
         self.assertLess(sun_altitude_deg(52.52, 13.4, when), 0)
 
+    def test_next_events_after_noon_include_sunset(self):
+        from zenith.sky.sun import next_sun_events
+
+        when = datetime(2026, 8, 15, 10, 0, tzinfo=timezone.utc)
+        names = [row["name"] for row in next_sun_events(52.52, 13.4, "Europe/Berlin", -18.0, when)]
+        self.assertIn("sunset", names)
+        self.assertIn("night", names)
+
+    def test_dst_active_in_berlin_summer(self):
+        from zenith.sky.clock import dst_active
+
+        summer = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+        winter = datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc)
+        self.assertTrue(dst_active("Europe/Berlin", summer))
+        self.assertFalse(dst_active("Europe/Berlin", winter))
+
 
 if __name__ == "__main__":
     unittest.main()

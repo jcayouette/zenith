@@ -19,7 +19,7 @@ type JsonSchema = {
 type Values = Record<string, unknown>;
 
 const GROUP_COPY: Record<string, string> = {
-  location: "Site position for day/night, satellites, and aurora.",
+    location: "Site position. Day/night follows the sun here; the clock only needs to be NTP-synced.",
   camera: "Sensor, archive, and capture pipeline.",
   picamera2: "Raspberry Pi HQ / IMX477 ISP.",
   indi: "USB astro cameras via indiserver.",
@@ -154,6 +154,7 @@ export default function Settings() {
             ) : null}
           </div>
           {group.key === "camera" ? <CameraPower /> : null}
+          {group.key === "location" ? <LocationClock /> : null}
           <div className="divide-y divide-white/8 rounded-2xl border border-white/8 bg-panel/60">
             {fields.map(([field, spec]) => (
               <Field
@@ -161,6 +162,11 @@ export default function Settings() {
                 name={field}
                 spec={resolve(spec, schemaQuery.data.$defs ?? {})}
                 value={(group.value as Values)[field]}
+                disabled={
+                  group.key === "location" &&
+                  field === "timezone" &&
+                  Boolean((group.value as Values).timezone_auto)
+                }
                 onChange={(next) =>
                   setDraft({
                     ...draft,
@@ -174,6 +180,80 @@ export default function Settings() {
       </div>
     </div>
   );
+}
+
+type ClockInfo = {
+  timezone: string;
+  timezone_auto: boolean;
+  dst_active: boolean;
+  utc_offset: string;
+  local_time: string;
+  mode: string;
+  session_date: string;
+  sun_alt: number;
+  ntp: { synchronized: boolean; ntp_enabled: boolean };
+  next: Array<{ name: string; at: string }>;
+  cycle: string;
+};
+
+function LocationClock() {
+  const query = useQuery({
+    queryKey: ["clock"],
+    queryFn: () => fetch("/api/clock").then((r) => r.json() as Promise<ClockInfo>),
+    refetchInterval: 30_000,
+  });
+  const clock = query.data;
+  return (
+    <div className="mb-4 rounded-2xl border border-white/8 bg-panel/60 px-5 py-4">
+      <p className="text-sm text-white/90">Sun cycle and clock</p>
+      <p className="mt-0.5 text-xs text-white/40">
+        Night starts when the sun drops below the altitude threshold at this site. NTP keeps the
+        Pi clock true; Automatic DST uses the IANA timezone (CET/CEST). A wall-clock schedule would
+        be wrong near the solstices.
+      </p>
+      {clock ? (
+        <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+          <div className="flex justify-between gap-3">
+            <dt className="text-white/45">Now</dt>
+            <dd className="text-white/85">
+              {clock.mode} · sun {clock.sun_alt >= 0 ? "+" : ""}
+              {clock.sun_alt.toFixed(1)}°
+            </dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="text-white/45">Local</dt>
+            <dd className="text-white/85">
+              {clock.timezone} {clock.utc_offset}
+              {clock.dst_active ? " · DST" : ""}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="text-white/45">NTP</dt>
+            <dd className={clock.ntp.synchronized ? "text-aurora" : "text-amber-300"}>
+              {clock.ntp.synchronized ? "Synced" : clock.ntp.ntp_enabled ? "Not synced" : "Off"}
+            </dd>
+          </div>
+          <div className="flex justify-between gap-3">
+            <dt className="text-white/45">Session</dt>
+            <dd className="text-white/85">{clock.session_date}</dd>
+          </div>
+          {clock.next.slice(0, 4).map((event) => (
+            <div key={event.name} className="flex justify-between gap-3">
+              <dt className="capitalize text-white/45">{event.name}</dt>
+              <dd className="text-white/85">{formatLocalStamp(event.at)}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="mt-3 text-xs text-white/35">Reading sun times…</p>
+      )}
+    </div>
+  );
+}
+
+function formatLocalStamp(iso: string) {
+  const stamp = iso.replace("T", " ");
+  return stamp.length > 16 ? stamp.slice(0, 16) : stamp;
 }
 
 function CameraPower() {
@@ -255,11 +335,13 @@ function Field({
   spec,
   value,
   onChange,
+  disabled,
 }: {
   name: string;
   spec: JsonSchema;
   value: unknown;
   onChange: (v: unknown) => void;
+  disabled?: boolean;
 }) {
   const type = Array.isArray(spec.type) ? spec.type[0] : spec.type;
   const title = spec.title ?? name.replaceAll("_", " ");
@@ -270,7 +352,7 @@ function Field({
   let control: ReactNode;
   if (spec.enum) {
     control = (
-      <select className={inputClass} value={String(value ?? "")} onChange={(e) => onChange(coerce(e.target.value, spec))}>
+      <select className={inputClass} value={String(value ?? "")} disabled={disabled} onChange={(e) => onChange(coerce(e.target.value, spec))}>
         {spec.enum.map((opt) => (
           <option key={String(opt)} value={String(opt)}>
             {String(opt)}
@@ -284,6 +366,7 @@ function Field({
         type="button"
         role="switch"
         aria-checked={Boolean(value)}
+        disabled={disabled}
         onClick={() => onChange(!value)}
         className={`relative h-6 w-10 shrink-0 rounded-full transition ${value ? "bg-aurora" : "bg-white/15"}`}
       >
@@ -301,13 +384,14 @@ function Field({
         step={type === "integer" ? 1 : 0.01}
         min={spec.minimum}
         max={spec.maximum}
+        disabled={disabled}
         value={value === undefined || value === null ? "" : String(value)}
         onChange={(e) => onChange(e.target.value === "" ? 0 : Number(e.target.value))}
       />
     );
   } else {
     control = (
-      <input className={inputClass} value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />
+      <input className={inputClass} disabled={disabled} value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />
     );
   }
 

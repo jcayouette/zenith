@@ -10,6 +10,7 @@ from threading import Lock
 from typing import Any
 
 from zenith.paths import DATA_DIR
+from zenith.sky.clock import ntp_status
 
 _CPU_LOCK = Lock()
 _CPU_SAMPLE: tuple[int, int] | None = None
@@ -32,6 +33,7 @@ def collect() -> dict[str, Any]:
     temps = _temps()
     cpu = _cpu()
     power = _power()
+    ntp = ntp_status()
     payload = {
         "hostname": socket.gethostname(),
         "uptime_s": _uptime(),
@@ -40,6 +42,7 @@ def collect() -> dict[str, Any]:
         "disks": disks,
         "temps": temps,
         "power": power,
+        "ntp": ntp,
         "process": _process(),
         "alerts": [],
     }
@@ -338,6 +341,11 @@ def _alerts(payload: dict[str, Any]) -> list[dict[str, str]]:
     busy = cpu.get("percent")
     if busy is not None and busy >= 95:
         alerts.append({"level": "warn", "code": "cpu", "message": f"CPU {busy:.0f}%"})
+    ntp = payload.get("ntp") or {}
+    if ntp.get("ntp_enabled") is False:
+        alerts.append({"level": "warn", "code": "ntp", "message": "NTP is off — day/night times can drift"})
+    elif ntp.get("synchronized") is False:
+        alerts.append({"level": "warn", "code": "ntp", "message": "Clock is not NTP-synced"})
     if not alerts:
         alerts.append({"level": "ok", "code": "ok", "message": "Pi looks healthy"})
     return alerts

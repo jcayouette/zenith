@@ -24,6 +24,13 @@ export default function Live() {
   const [tel, setTel] = useState<Telemetry>(empty);
   const [connected, setConnected] = useState(false);
   const [needsLocation, setNeedsLocation] = useState(false);
+  const [clock, setClock] = useState<{
+    dst_active: boolean;
+    utc_offset: string;
+    timezone: string;
+    ntp: { synchronized: boolean };
+    next: Array<{ name: string; at: string }>;
+  } | null>(null);
   const [wantFocus, setWantFocus] = useState<boolean | null>(null);
   const [adjustOpen, setAdjustOpen] = useState(false);
   const wasFocus = useRef(false);
@@ -48,6 +55,32 @@ export default function Live() {
         setNeedsLocation((s.location?.latitude ?? 0) === 0 && (s.location?.longitude ?? 0) === 0);
       })
       .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    let stop = false;
+    async function tick() {
+      try {
+        const res = await fetch("/api/clock");
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          dst_active: boolean;
+          utc_offset: string;
+          timezone: string;
+          ntp: { synchronized: boolean };
+          next: Array<{ name: string; at: string }>;
+        };
+        if (!stop) setClock(data);
+      } catch {
+        /* ignore */
+      }
+    }
+    void tick();
+    const id = window.setInterval(() => void tick(), 30_000);
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
   }, []);
 
   useEffect(() => {
@@ -125,6 +158,13 @@ export default function Live() {
                 Sun {tel.sun_alt >= 0 ? "+" : ""}
                 {tel.sun_alt.toFixed(1)}°
               </p>
+              {clock ? (
+                <p className="mt-1 text-xs text-white/40">
+                  {clock.timezone} {clock.utc_offset}
+                  {clock.dst_active ? " · DST" : ""}
+                  {clock.ntp.synchronized ? "" : " · clock not NTP-synced"}
+                </p>
+              ) : null}
             </div>
             <span className="mt-1 inline-flex items-center gap-2 rounded-full bg-white/5 px-2.5 py-1 text-[11px] text-white/55">
               <span className={`h-1.5 w-1.5 rounded-full ${liveDot}`} />
@@ -182,6 +222,11 @@ export default function Live() {
           <p className="px-1 text-xs text-white/35">
             {tel.session}
             {tel.saved ? " · archived" : ""}
+          </p>
+        ) : null}
+        {clock && clock.next[0] ? (
+          <p className="px-1 text-xs text-white/35">
+            Next {clock.next[0].name} {clock.next[0].at.replace("T", " ").slice(0, 16)}
           </p>
         ) : null}
       </aside>

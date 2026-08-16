@@ -115,3 +115,49 @@ def sky_session(
         sun_alt=sun_alt,
         hour_angle_deg=hour_angle,
     )
+
+
+def next_sun_events(
+    lat: float,
+    lon: float,
+    tz_name: str,
+    night_threshold: float,
+    when: datetime | None = None,
+    *,
+    hours: float = 36,
+    step_minutes: int = 2,
+) -> list[dict[str, str]]:
+    """Upcoming sunset, night, dawn, and sunrise from solar altitude — not clock hours."""
+    utc = _utc(when)
+    prev_alt = sun_altitude_deg(lat, lon, utc)
+    prev_mode = sky_mode(prev_alt, night_threshold)
+    step = timedelta(minutes=max(1, step_minutes))
+    end = utc + timedelta(hours=hours)
+    found: set[str] = set()
+    events: list[dict[str, str]] = []
+    t = utc
+    while t <= end and len(found) < 4:
+        t += step
+        alt = sun_altitude_deg(lat, lon, t)
+        mode = sky_mode(alt, night_threshold)
+        if "sunset" not in found and prev_alt >= 0 > alt:
+            events.append(_event("sunset", tz_name, t))
+            found.add("sunset")
+        if "sunrise" not in found and prev_alt < 0 <= alt:
+            events.append(_event("sunrise", tz_name, t))
+            found.add("sunrise")
+        if "night" not in found and prev_mode != "night" and mode == "night":
+            events.append(_event("night", tz_name, t))
+            found.add("night")
+        if "dawn" not in found and prev_mode == "night" and mode != "night":
+            events.append(_event("dawn", tz_name, t))
+            found.add("dawn")
+        prev_alt = alt
+        prev_mode = mode
+    events.sort(key=lambda row: row["at"])
+    return events
+
+
+def _event(name: str, tz_name: str, when: datetime) -> dict[str, str]:
+    local = local_time(tz_name, when)
+    return {"name": name, "at": local.isoformat(timespec="minutes")}

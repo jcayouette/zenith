@@ -28,6 +28,14 @@ def load_settings() -> ZenithSettings:
 
 def save_settings(settings: ZenithSettings) -> ZenithSettings:
     global _cache
+    if settings.location.timezone_auto:
+        settings = settings.model_copy(
+            update={
+                "location": settings.location.model_copy(
+                    update={"timezone": settings.location.resolved_timezone()}
+                )
+            }
+        )
     with _lock:
         _cache = settings
         _write(settings)

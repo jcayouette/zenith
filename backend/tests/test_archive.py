@@ -53,6 +53,38 @@ class ArchiveStoreTests(unittest.TestCase):
                 self.assertGreater(deleted["files"], 0)
                 self.assertEqual(store.list_sessions("night"), [])
 
+    def test_delete_session_keeps_processed(self):
+        from zenith.archive import store
+        from zenith.paths import product_write_path
+
+        rgb = np.zeros((16, 16, 3), dtype=np.uint8)
+        settings = ZenithSettings()
+        settings.camera.save_raw = False
+        settings.camera.save_png = True
+        settings.camera.save_jpeg = False
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch.object(store, "DATA_DIR", root),
+                patch("zenith.paths.DATA_DIR", root),
+            ):
+                night_date = datetime(2026, 8, 14).date()
+                store.save_frame(
+                    rgb_linear=rgb,
+                    rgb_preview=rgb,
+                    kind="night",
+                    session_date=night_date,
+                    when_local=datetime(2026, 8, 14, 22, 0, 0),
+                    settings=settings,
+                )
+                keogram = product_write_path(night_date, "keogram.jpg")
+                keogram.write_bytes(b"keogram")
+                store.delete_session("night", night_date)
+                self.assertEqual(store.list_sessions("night"), [])
+                self.assertTrue(keogram.is_file())
+                listing = store.list_processed("keograms")
+                self.assertEqual(len(listing["items"]), 1)
+
     def test_delete_kind_leaves_other_kind(self):
         from zenith.archive import store
 

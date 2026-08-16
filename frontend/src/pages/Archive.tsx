@@ -76,7 +76,7 @@ function deleteCopy(pending: PendingDelete) {
     const label = pending.kind === "night" ? "night" : "day";
     return {
       title: `Delete this ${label}?`,
-      body: `This removes ${pending.frames} frame${pending.frames === 1 ? "" : "s"} for ${pending.date}, including DNG/PNG, thumbs, and products. This cannot be undone.`,
+      body: `This removes ${pending.frames} frame${pending.frames === 1 ? "" : "s"} for ${pending.date} (DNG, PNG, JPEG, thumbs). Keograms, startrails, and timelapses on Processed stay. This cannot be undone.`,
       confirmLabel: `Delete ${label}`,
       path: `/api/archive/${pending.kind}/${pending.date}`,
     };
@@ -85,14 +85,14 @@ function deleteCopy(pending: PendingDelete) {
     const label = pending.kind === "night" ? "nights" : "days";
     return {
       title: `Delete all ${label}?`,
-      body: `This removes ${pending.sessions} ${label} (${pending.frames} frame${pending.frames === 1 ? "" : "s"}). Keograms and other products for those dates go too. This cannot be undone.`,
+      body: `This removes ${pending.sessions} ${label} (${pending.frames} frame${pending.frames === 1 ? "" : "s"}). Processed keograms, startrails, and timelapses stay. This cannot be undone.`,
       confirmLabel: `Delete ${label}`,
       path: `/api/archive/${label}`,
     };
   }
   return {
     title: "Delete the entire archive?",
-    body: `This removes ${pending.nights} night${pending.nights === 1 ? "" : "s"} and ${pending.days} day${pending.days === 1 ? "" : "s"} (${pending.frames} frames). Config, darks, and the live camera are not touched. This cannot be undone.`,
+    body: `This removes ${pending.nights} night${pending.nights === 1 ? "" : "s"} and ${pending.days} day${pending.days === 1 ? "" : "s"} (${pending.frames} frames). Processed outputs, config, darks, and the live camera are not touched. This cannot be undone.`,
     confirmLabel: "Delete everything",
     path: "/api/archive/all",
   };

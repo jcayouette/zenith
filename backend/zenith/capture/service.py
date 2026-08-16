@@ -204,7 +204,7 @@ class CaptureService:
             session = sky_session(
                 settings.location.latitude,
                 settings.location.longitude,
-                settings.location.timezone,
+                settings.location.resolved_timezone(),
                 settings.location.night_sun_altitude_deg,
             )
             await self._maybe_finalize(session, settings)
@@ -257,7 +257,7 @@ class CaptureService:
                 self._ctrl_key = ctrl_key
             will_save = False
             raw_dest = None
-            when_local = local_time(settings.location.timezone)
+            when_local = local_time(settings.location.resolved_timezone())
             try:
                 will_save = (not focus) and should_save(session.kind, settings)
                 if will_save and settings.camera.save_raw and backend.name == "picamera2":

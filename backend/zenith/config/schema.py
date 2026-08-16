@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from zenith.sky.clock import system_timezone
+
 BackendName = Literal["simulator", "picamera2", "indi", "mqtt_libcamera"]
 Binning = Literal[1, 2]
 
@@ -29,12 +31,7 @@ def default_tuning_file() -> str:
 
 
 def default_timezone() -> str:
-    path = Path("/etc/timezone")
-    if path.is_file():
-        tz = path.read_text(encoding="utf-8").strip()
-        if tz:
-            return tz
-    return "UTC"
+    return system_timezone()
 
 
 class LocationSettings(BaseModel):
@@ -57,8 +54,19 @@ class LocationSettings(BaseModel):
         ge=-400,
         le=9000,
     )
+    timezone_auto: bool = Field(
+        default=True,
+        title="Automatic DST",
+        description=(
+            "Follow the Pi timezone from timedatectl, including CET/CEST. "
+            "Day and night still switch on sun altitude at this site, not on a clock hour. "
+            "NTP keeps that clock accurate so sunset is computed correctly."
+        ),
+    )
     timezone: str = _f(
-        "IANA timezone for night dating and overlays, e.g. America/Denver or Europe/Amsterdam.",
+        "IANA timezone for folder dates and overlays (Europe/Berlin, America/Denver, …). "
+        "Ignored while Automatic DST is on — Zenith then uses the Pi timezone. "
+        "Named zones already include daylight saving; do not use a fixed UTC offset.",
         default_factory=default_timezone,
     )
     keogram_angle_deg: float = _f(
@@ -75,6 +83,11 @@ class LocationSettings(BaseModel):
         ge=-24,
         le=0,
     )
+
+    def resolved_timezone(self) -> str:
+        if self.timezone_auto:
+            return system_timezone() or self.timezone
+        return self.timezone
 
 
 class CameraCommonSettings(BaseModel):

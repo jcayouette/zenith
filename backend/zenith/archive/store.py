@@ -13,11 +13,9 @@ from zenith.imaging import atomic_write, encode_jpeg, encode_png, rgb_thumbnail
 from zenith.paths import (
     DATA_DIR,
     PRODUCT_PLACES,
-    PROCESSED_KINDS,
     jpeg_dir,
     png_dir,
     product_find_path,
-    products_dir,
     raw_dir,
     session_root,
     thumbs_dir,
@@ -252,18 +250,16 @@ def _existing_raw(kind: str, session_date: date, stem: str) -> Path | None:
 
 
 def delete_session(kind: str, session_date: date) -> dict[str, Any]:
-    """Remove one night or day folder (frames + night products)."""
+    """Remove one night or day folder of capture frames. Processed outputs stay."""
     files = 0
     root = session_root(kind, session_date)
     if root.is_dir():
         files += _rmtree_inside_data(root)
-    if kind == "night":
-        files += _delete_processed_date(session_date)
     return {"ok": True, "kind": kind, "date": session_date.isoformat(), "files": files}
 
 
 def delete_kind(kind: str) -> dict[str, Any]:
-    """Remove every dated session of this kind. Night also clears products."""
+    """Remove every dated session of this kind. Processed outputs stay."""
     folder = "nights" if kind == "night" else "days"
     sessions = 0
     files = 0
@@ -274,26 +270,11 @@ def delete_kind(kind: str) -> dict[str, Any]:
                 continue
             sessions += 1
             files += _rmtree_inside_data(child)
-    if kind == "night":
-        processed_root = DATA_DIR / "processed"
-        if processed_root.is_dir():
-            for cat in PROCESSED_KINDS:
-                cat_root = processed_root / cat
-                if not cat_root.is_dir():
-                    continue
-                for child in list(cat_root.iterdir()):
-                    if _is_session_dir(child):
-                        files += _rmtree_inside_data(child)
-        products_root = DATA_DIR / "products"
-        if products_root.is_dir():
-            for child in list(products_root.iterdir()):
-                if _is_session_dir(child):
-                    files += _rmtree_inside_data(child)
     return {"ok": True, "kind": kind, "sessions": sessions, "files": files}
 
 
 def delete_all() -> dict[str, Any]:
-    """Remove all archived nights, days, and products. Leaves config, darks, logs."""
+    """Remove all archived nights and days. Leaves processed outputs, config, darks, logs."""
     nights = delete_kind("night")
     days = delete_kind("day")
     return {
@@ -302,19 +283,6 @@ def delete_all() -> dict[str, Any]:
         "days": days["sessions"],
         "files": nights["files"] + days["files"],
     }
-
-
-def _delete_processed_date(session_date: date) -> int:
-    files = 0
-    iso = session_date.isoformat()
-    for kind in PROCESSED_KINDS:
-        folder = DATA_DIR / "processed" / kind / iso
-        if folder.is_dir():
-            files += _rmtree_inside_data(folder)
-    legacy = products_dir(session_date)
-    if legacy.is_dir():
-        files += _rmtree_inside_data(legacy)
-    return files
 
 
 def _is_session_dir(path: Path) -> bool:

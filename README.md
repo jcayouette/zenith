@@ -1,68 +1,117 @@
 # Zenith
 
-Modern all-sky camera. Full design: [PLAN.md](PLAN.md).
+All-sky camera for Raspberry Pi. Design notes: [PLAN.md](PLAN.md).
 
-## How we work
+This tree is meant to run **on the Pi** (HQ / IMX477, NVMe, GPIO). Open `~/zenith` in Cursor on that machine and work there. GitHub is the source of truth.
 
-GitHub is the source of truth. Develop **on the Pi** in Cursor over SSH so you have the HQ camera, GPIO, and NVMe.
+## What you get
 
-1. Clone on the Pi: `git clone git@github.com:jcayouette/zenith.git ~/zenith`
-2. In Cursor: **Remote-SSH** → `acmeastro@10.0.0.52` → open `~/zenith`
-3. Commit and push from that window as usual
+- **Live** — WebSocket preview, focus vs RAW, colour/exposure sliders
+- **Archive** — night/day sessions, DNG/PNG, delete, RAW timelapse encode with progress
+- **Processed** — keograms, startrails, timelapses under typed folders
+- **Settings** — generated from the Pydantic schema
+- **System** — disk, RAM, CPU, temperatures, throttle flags
 
-Optional SSH config on the laptop:
+API + UI share one process on port **8000**.
 
-```
-Host acmeastro
-  HostName 10.0.0.52
-  User acmeastro
-```
+## Requirements
 
-Simulator-only UI work can still happen on a laptop; real capture runs on the Pi.
+On Raspberry Pi OS:
 
-## Stack
+- Python 3.11+
+- `python3-picamera2` (apt) so CSI capture works
+- `ffmpeg` for timelapses
+- Node.js **20+** and `npm` on `PATH` (a user-local install under `~/.local` is fine)
 
-- **Backend:** Python 3.11+, FastAPI, Pydantic, Picamera2 / INDI / MQTT camera backends
-- **Frontend:** React 19, TypeScript, Vite, Tailwind
+The venv **must** use `--system-site-packages` so apt `picamera2` / `simplejpeg` are visible. Keep **NumPy 1.x** (`numpy>=1.24,<2`). Pip NumPy 2.x breaks the apt camera stack.
 
-## Run on the Pi
+One Zenith process only — the HQ camera cannot be shared.
 
-Needs Node 20+ (`npm`), `python3-picamera2`, and `ffmpeg` (for timelapses).
+## First-time setup
 
 ```bash
-sudo apt install python3-picamera2 python3-venv ffmpeg
-cd ~/zenith/backend
+sudo apt install python3-picamera2 python3-venv python3-numpy ffmpeg git
+
+git clone git@github.com:jcayouette/zenith.git ~/zenith
+cd ~/zenith
+
+# Node 20+ (skip if `node -v` already shows v20+)
+export PATH="$HOME/.local/bin:$PATH"
+
+cd backend
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
+python -c "import numpy; assert numpy.__version__.startswith('1.'), numpy.__version__"
 pip install -e .
-cd ../frontend && npm install && npm run build
+
+cd ../frontend
+npm install
+npm run build
+```
+
+Confirm `import picamera2` works inside the venv. If NumPy reports 2.x, do not `pip install numpy` — recreate the venv with `--system-site-packages` and use apt’s 1.24.x.
+
+## Run
+
+```bash
+export PATH="$HOME/.local/bin:$HOME/zenith/backend/.venv/bin:$PATH"
+cd ~/zenith
 ZENITH_DATA=$HOME/zenith/data zenith --host 0.0.0.0 --port 8000
 ```
 
-Open http://10.0.0.52:8000/
+Open http://127.0.0.1:8000/ on the Pi, or `http://<pi-ip>:8000/` on the LAN.
 
-On this Pi the camera backend defaults to **picamera2** (HQ / IMX477). Off-Pi it defaults to the simulator. Set **latitude / longitude** in Settings so day/night and night dating match the site.
+Optional:
 
-Daytime frames are stored only when `camera.save_day` is on. Night frames are always archived while night capture is running.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ZENITH_DATA` | `~/zenith/data` | Archive, processed files, `config.yaml` |
+| `ZENITH_CONFIG` | `$ZENITH_DATA/config.yaml` | Settings file (gitignored) |
 
-Science archive is **DNG** (Picamera2) or lossless **PNG** (simulator). JPEG is live preview and thumbs only. Auto gain / contrast / colour stretch the live view; they do not rewrite the DNG.
+After UI changes, rebuild then restart:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cd ~/zenith/frontend && npm run build
+```
+
+Stop the running `zenith` process (`kill <pid>`, `kill -9` if it is stuck), then start it again. Do not run two copies. Disconnect the camera in Settings before unplugging CSI.
+
+Set **latitude / longitude** (and timezone) in Settings so night dating matches the site. Night frames always save; daytime frames save when `camera.save_day` is on.
+
+## Tests
+
+```bash
+cd ~/zenith/backend
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+## Camera and files
+
+On this Pi the backend defaults to **picamera2**. Off-Pi (no Picamera2) it defaults to the **simulator**.
+
+Science archive is **12-bit DNG** (HQ) plus a lossless RGB **PNG**. JPEG is live preview and thumbs only. Colour/gain sliders affect JPEG/PNG/thumbs; they do not stretch the DNG.
+
+Timelapses prefer developed DNG → H.264. Outputs go to `processed/`, not mixed into the frame folders.
 
 ## Data layout
 
 ```
 $ZENITH_DATA/
+  config.yaml
   latest.jpg
-  nights/YYYY-MM-DD/{raw,png,thumbs}/
-  days/YYYY-MM-DD/{raw,png,thumbs}/
-  products/YYYY-MM-DD/
-    keogram_realtime.jpg
-    keogram.jpg
-    startrails.jpg
-    startrails_stack.png
-    mini.mp4
-    timelapse.mp4
+  nights/YYYY-MM-DD/{raw,png,jpeg,thumbs}/
+  days/YYYY-MM-DD/{raw,png,jpeg,thumbs}/
+  processed/
+    keograms/YYYY-MM-DD/
+    startrails/YYYY-MM-DD/
+    timelapses/YYYY-MM-DD/
+    developed/YYYY-MM-DD/    # DNG→JPEG cache for ffmpeg
+  products/YYYY-MM-DD/       # legacy; still listed if present
+  darks/
+  logs/
 ```
 
-`raw/` holds 12-bit DNG (HQ camera) or lossless PNG. `png/` is a lossless RGB companion for timelapses. `thumbs/` are small JPEGs for the archive page.
-
 A night is sunset on date D through sunrise D+1, stored as `nights/YYYY-MM-DD`.
+
+`data/` is gitignored. Do not commit `config.yaml`, `.env`, or captured frames.

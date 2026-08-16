@@ -56,6 +56,7 @@ type SystemHealth = {
     flags: Record<string, boolean>;
   };
   process: { pid: number; rss_bytes: number; threads: number };
+  ntp?: { synchronized: boolean; ntp_enabled: boolean };
   alerts: Alert[];
 };
 
@@ -175,6 +176,13 @@ export default function System() {
                 <Row label="PID" value={String(data.process.pid)} />
                 <Row label="Zenith RAM" value={formatBytes(data.process.rss_bytes)} />
                 <Row label="Threads" value={String(data.process.threads)} />
+                <Row
+                  label="NTP"
+                  value={
+                    data.ntp?.synchronized ? "Synced" : data.ntp?.ntp_enabled ? "Not synced" : "—"
+                  }
+                  warn={data.ntp != null && !data.ntp.synchronized}
+                />
               </dl>
             </div>
             <div className="rounded-2xl border border-white/8 bg-panel/70 p-5">
