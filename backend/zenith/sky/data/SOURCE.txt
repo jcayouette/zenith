@@ -1,0 +1,6 @@
+Star positions (mag ≤ 6.0), constellation stick figures, and
+visual-astronomy asterisms are derived from d3-celestial (BSD),
+itself based on Hipparcos. Constellation-line vertices that sit
+just off a catalog star are included so stick figures stay complete.
+
+https://github.com/ofrohn/d3-celestial

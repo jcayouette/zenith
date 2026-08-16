@@ -367,6 +367,70 @@ class OverlaySettings(BaseModel):
     cardinals: bool = _f("Draw N/E/S/W around the horizon ring. Requires keogram/compass angle to be correct.", default=True)
 
 
+class SkySettings(BaseModel):
+    constellations: bool = _f("Draw constellation stick figures on the Sky page.", default=True)
+    constellation_names: bool = _f("Label constellations on the Sky page.", default=True)
+    asterisms: bool = _f(
+        "Draw common visual-astronomy asterisms (Big Dipper, Summer Triangle, Teapot, …).",
+        default=True,
+    )
+    star_names: bool = _f("Label the brightest named stars on the Sky page.", default=True)
+    grid: bool = _f("Draw altitude circles and azimuth spokes on the Sky page.", default=False)
+    planets: bool = _f("Mark the sun and moon when they are above the horizon.", default=True)
+    satellites: bool = _f(
+        "Track Celestrak satellites on the Sky page (stations, visual, Starlink, GNSS, …).",
+        default=True,
+    )
+    mag_limit: float = _f(
+        "Faintest catalog stars drawn on the Sky overlay (and painted by the simulator). "
+        "Constellation and asterism lines only connect stars at or brighter than this.",
+        default=5.0,
+        ge=1.0,
+        le=6.0,
+    )
+    star_name_mag: float = _f(
+        "Name catalog stars brighter than this magnitude on the Sky page.",
+        default=1.85,
+        ge=0.0,
+        le=6.0,
+    )
+    min_sat_alt_deg: float = _f(
+        "Ignore satellites below this altitude (degrees) for the overlay and pass list. "
+        "0 shows everything above the horizon, like Stellarium.",
+        default=0.0,
+        ge=0.0,
+        le=70.0,
+    )
+    sat_icon_scale: float = _f(
+        "Satellite icon size on the Sky overlay. 1 is the default tiny marker.",
+        default=1.0,
+        ge=0.4,
+        le=4.0,
+        title="Satellite icon size",
+    )
+    simulator_catalog: bool = _f(
+        "Simulator paints a catalog sky at this site and time, even during the day, so overlays "
+        "can be developed without a real night. Off: daytime simulator stays blue.",
+        default=True,
+        title="Simulator catalog sky",
+    )
+    horizon: float = _f(
+        "How far the horizon ring sits in the frame. 1.0 puts the horizon on the long edge "
+        "so the overlay fills a 4:3 HQ image. Lower if your lens circle is smaller.",
+        default=1.0,
+        ge=0.4,
+        le=1.5,
+        title="Horizon fill",
+    )
+    constellation_line_px: float = _f(
+        "Constellation stick-figure thickness in pixels on the Sky page.",
+        default=1.0,
+        ge=0.5,
+        le=6.0,
+        title="Line thickness",
+    )
+
+
 class ZenithSettings(BaseModel):
     location: LocationSettings = Field(default_factory=LocationSettings)
     camera: CameraCommonSettings = Field(default_factory=CameraCommonSettings)
@@ -394,6 +458,7 @@ class ZenithSettings(BaseModel):
         )
     )
     overlay: OverlaySettings = Field(default_factory=OverlaySettings)
+    sky: SkySettings = Field(default_factory=SkySettings)
     products: ProductSettings = Field(default_factory=ProductSettings)
 
     model_config = {"title": "Zenith settings", "extra": "ignore"}

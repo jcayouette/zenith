@@ -24,8 +24,8 @@ def local_time(tz_name: str, when: datetime | None = None) -> datetime:
     return utc.astimezone(tz)
 
 
-def _solar_geometry(lat: float, lon: float, utc: datetime) -> tuple[float, float]:
-    """Return (altitude_deg, hour_angle_deg). Hour angle is negative in the morning."""
+def _solar_geometry(lat: float, lon: float, utc: datetime) -> tuple[float, float, float]:
+    """Return (altitude_deg, azimuth_deg, hour_angle_deg). Azimuth 0=north, 90=east."""
     lat_r = math.radians(lat)
     n = utc.timetuple().tm_yday
     frac = (utc.hour + utc.minute / 60 + utc.second / 3600) / 24
@@ -55,15 +55,28 @@ def _solar_geometry(lat: float, lon: float, utc: datetime) -> tuple[float, float
     )
     cos_zenith = max(-1.0, min(1.0, cos_zenith))
     altitude = 90 - math.degrees(math.acos(cos_zenith))
-    return altitude, hour_angle_deg
+    azimuth = (
+        math.degrees(
+            math.atan2(
+                math.sin(hour_angle),
+                math.cos(hour_angle) * math.sin(lat_r) - math.tan(decl) * math.cos(lat_r),
+            )
+        )
+        + 180
+    ) % 360
+    return altitude, azimuth, hour_angle_deg
 
 
 def sun_altitude_deg(lat: float, lon: float, when: datetime | None = None) -> float:
     return _solar_geometry(lat, lon, _utc(when))[0]
 
 
-def solar_hour_angle_deg(lat: float, lon: float, when: datetime | None = None) -> float:
+def sun_azimuth_deg(lat: float, lon: float, when: datetime | None = None) -> float:
     return _solar_geometry(lat, lon, _utc(when))[1]
+
+
+def solar_hour_angle_deg(lat: float, lon: float, when: datetime | None = None) -> float:
+    return _solar_geometry(lat, lon, _utc(when))[2]
 
 
 def sky_mode(sun_alt: float, night_threshold: float) -> str:
@@ -99,7 +112,7 @@ def sky_session(
     when: datetime | None = None,
 ) -> SkySession:
     utc = _utc(when)
-    sun_alt, hour_angle = _solar_geometry(lat, lon, utc)
+    sun_alt, _az, hour_angle = _solar_geometry(lat, lon, utc)
     mode = sky_mode(sun_alt, night_threshold)
     local = local_time(tz_name, utc)
     if sun_alt >= 0:

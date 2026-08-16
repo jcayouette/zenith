@@ -3,6 +3,7 @@ import Archive from "./pages/Archive";
 import Live from "./pages/Live";
 import Processed from "./pages/Processed";
 import Settings from "./pages/Settings";
+import Sky from "./pages/Sky";
 import System from "./pages/System";
 import Placeholder from "./pages/Placeholder";
 
@@ -57,10 +58,7 @@ export default function App() {
             path="/charts"
             element={<Placeholder title="Charts" note="Exposure, ADU, star count, SQM, Kp, and sensors." />}
           />
-          <Route
-            path="/sky"
-            element={<Placeholder title="Sky" note="Named satellites, ISS passes, Stellarium import." />}
-          />
+          <Route path="/sky" element={<Sky />} />
           <Route
             path="/detections"
             element={<Placeholder title="Detections" note="Meteors, aircraft, and highlight reels." />}

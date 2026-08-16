@@ -37,6 +37,7 @@ def ensure_data_dir() -> Path:
     for kind in PROCESSED_KINDS:
         (DATA_DIR / "processed" / kind).mkdir(exist_ok=True)
     (DATA_DIR / "darks").mkdir(exist_ok=True)
+    (DATA_DIR / "tle").mkdir(exist_ok=True)
     (DATA_DIR / "logs").mkdir(exist_ok=True)
     return DATA_DIR
 

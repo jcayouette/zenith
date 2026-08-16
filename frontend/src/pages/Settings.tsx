@@ -27,6 +27,7 @@ const GROUP_COPY: Record<string, string> = {
   day: "Exposure while the sun is up.",
   night: "Exposure after night begins.",
   overlay: "Text on the live JPEG and thumbs. Raw stays clean.",
+  sky: "Constellations, named stars, and satellites on the Sky page. Same projection as the simulator.",
   products: "Keograms, startrails, and timelapses.",
 };
 
@@ -39,6 +40,7 @@ const GROUP_LABEL: Record<string, string> = {
   day: "Day",
   night: "Night",
   overlay: "Overlay",
+  sky: "Sky",
   products: "Products",
 };
 
@@ -83,10 +85,12 @@ export default function Settings() {
     if (!schemaQuery.data || !draft) return [];
     const defs = schemaQuery.data.$defs ?? {};
     const props = schemaQuery.data.properties ?? {};
-    return Object.entries(props).map(([key, spec]) => {
-      const resolved = resolve(spec, defs);
-      return { key, spec: resolved, value: (draft[key] ?? {}) as Values };
-    });
+    return Object.entries(props)
+      .filter(([key]) => key !== "sky")
+      .map(([key, spec]) => {
+        const resolved = resolve(spec, defs);
+        return { key, spec: resolved, value: (draft[key] ?? {}) as Values };
+      });
   }, [schemaQuery.data, draft]);
 
   useEffect(() => {

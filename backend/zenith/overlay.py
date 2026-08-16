@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from zenith.config.schema import OverlaySettings
+from zenith.sky.project import altaz_to_xy
 
 
 def apply_overlay(
@@ -49,12 +50,15 @@ def apply_overlay(
 
     if overlay.cardinals:
         w, h = img.size
-        cx, cy = w / 2, h / 2
-        radius = min(w, h) * 0.46
-        for label, ang in (("N", -90), ("E", 0), ("S", 90), ("W", 180)):
-            rad = np.deg2rad(ang + cardinal_offset_deg)
-            px = cx + np.cos(rad) * radius
-            py = cy + np.sin(rad) * radius
-            draw.text((px - 6, py - 8), label, fill=(251, 191, 36), font=small)
+        for label, az in (("N", 0.0), ("E", 90.0), ("S", 180.0), ("W", 270.0)):
+            px, py, vis = altaz_to_xy(
+                0.0,
+                az,
+                w,
+                h,
+                north_angle_deg=cardinal_offset_deg,
+            )
+            if vis:
+                draw.text((px - 6, py - 8), label, fill=(251, 191, 36), font=small)
 
     return np.array(img)

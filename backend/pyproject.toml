@@ -15,6 +15,7 @@ dependencies = [
   "pyyaml>=6.0.2",
   "pillow>=10.4.0",
   "rawpy>=0.21.0,<0.22",
+  "sgp4>=2.23",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +28,9 @@ zenith = "zenith.__main__:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["zenith*"]
+
+[tool.setuptools.package-data]
+zenith = ["sky/data/*.json"]
 
 [tool.ruff]
 line-length = 100

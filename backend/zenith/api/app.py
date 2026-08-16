@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from zenith import __version__
-from zenith.api.routes import archive, live, processed, settings, status
+from zenith.api.routes import archive, live, processed, settings, sky, status
 from zenith.capture.service import CaptureService, LiveHub
 from zenith.paths import FRONTEND_DIST, ensure_data_dir
 
@@ -63,6 +63,7 @@ def create_app() -> FastAPI:
     app.include_router(live.router, prefix="/api")
     app.include_router(archive.router, prefix="/api")
     app.include_router(processed.router, prefix="/api")
+    app.include_router(sky.router, prefix="/api")
     _mount_frontend(app)
     return app
 
