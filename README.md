@@ -53,13 +53,36 @@ Confirm `import picamera2` works inside the venv. If NumPy reports 2.x, do not `
 
 ## Run
 
+On the Pi, **Task** is the operator CLI and a **systemd user unit** keeps one Zenith process alive (the HQ camera cannot be shared). Install [Task](https://taskfile.dev) once:
+
 ```bash
-export PATH="$HOME/.local/bin:$HOME/zenith/backend/.venv/bin:$PATH"
-cd ~/zenith
-ZENITH_DATA=$HOME/zenith/data zenith --host 0.0.0.0 --port 8000
+mkdir -p ~/.local/bin
+curl -sL https://taskfile.dev/install.sh | sh -s -- -d -b "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then from `~/zenith`:
+
+```bash
+task install    # systemd user unit; enable at boot (may need linger)
+task start
+task status
+task stop
+task restart
+task logs
+task ui         # rebuild frontend; no restart
+task test
 ```
 
 Open http://127.0.0.1:8000/ on the Pi, or `http://<pi-ip>:8000/` on the LAN.
+
+If it should come back after reboot:
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+Do not launch a second `zenith` from a terminal. After Python/backend changes: `task restart`. After UI-only changes: `task ui` and hard-refresh. Disconnect the camera in Settings before unplugging CSI.
 
 Optional:
 
@@ -67,24 +90,9 @@ Optional:
 | --- | --- | --- |
 | `ZENITH_DATA` | `~/zenith/data` | Archive, processed files, `config.yaml` |
 | `ZENITH_CONFIG` | `$ZENITH_DATA/config.yaml` | Settings file (gitignored) |
-
-After UI changes, rebuild then restart:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-cd ~/zenith/frontend && npm run build
-```
-
-Stop the running `zenith` process (`kill <pid>`, `kill -9` if it is stuck), then start it again. Do not run two copies. Disconnect the camera in Settings before unplugging CSI.
+| `ZENITH_RUNTIME` | `native` | Later: `compose` with the same `task start` / `task stop` verbs |
 
 Set **latitude / longitude** (and timezone) in Settings so night dating matches the site. Night frames always save; daytime frames save when `camera.save_day` is on.
-
-## Tests
-
-```bash
-cd ~/zenith/backend
-.venv/bin/python -m unittest discover -s tests -v
-```
 
 ## Camera and files
 

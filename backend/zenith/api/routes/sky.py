@@ -4,13 +4,15 @@ import io
 import threading
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 from PIL import Image
 
 from zenith.config.store import load_settings
-from zenith.sky.acmeta import lookup_aircraft
+from zenith.sky.acmeta import lookup_aircraft, lookup_route
 from zenith.sky.aircraft import build_aircraft
+from zenith.sky.groundmap import map_png, tile_png
 from zenith.sky.layers import build_sats, build_sky
+from zenith.sky.places import nearby_places
 from zenith.sky.satcat import describe_sat, lookup_satcat
 from zenith.sky.tle import refresh_tles
 
@@ -87,12 +89,58 @@ def sky_aircraft(request: Request):
     return build_aircraft(settings, width=width, height=height)
 
 
+@router.get("/sky/map")
+def sky_map(
+    request: Request,
+    w: int | None = Query(default=None),
+    h: int | None = Query(default=None),
+):
+    """Flat ground map of the camera's aircraft coverage, same overlay as the radar layer."""
+    settings = load_settings()
+    if settings.location.latitude == 0 and settings.location.longitude == 0:
+        return Response(status_code=400)
+    width, height = _frame_size(request)
+    if w and h and w > 8 and h > 8:
+        width, height = w, h
+    return Response(content=map_png(settings, width, height), media_type="image/png")
+
+
+@router.get("/sky/maptile/{z}/{x}/{y}")
+def sky_maptile(z: int, x: int, y: int):
+    """OSM/CARTO tile proxy so the Sky map can stay sharp at the current view zoom."""
+    if z < 0 or z > 20:
+        return Response(status_code=400)
+    n = 2**z
+    if y < 0 or y >= n:
+        return Response(status_code=400)
+    png = tile_png(z, x % n, y)
+    if not png:
+        return Response(status_code=404)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@router.get("/sky/places")
+def sky_places():
+    """Nearby towns and cities for map labels, cached around the site."""
+    settings = load_settings()
+    if settings.location.latitude == 0 and settings.location.longitude == 0:
+        return {"places": []}
+    return {"places": nearby_places(settings)}
+
+
 @router.get("/sky/aircraft/{icao24}")
-def sky_aircraft_meta(icao24: str):
-    """Type, registration, and operator for one ICAO24 (adsbdb / hexdb)."""
-    row = lookup_aircraft(icao24)
-    if not row:
-        return {"icao24": icao24, "error": "No aircraft type record"}
+def sky_aircraft_meta(icao24: str, callsign: str | None = Query(default=None)):
+    """Type, registration, operator, and filed route for one ICAO24 (adsbdb / hexdb)."""
+    row = lookup_aircraft(icao24) or {"icao24": icao24, "error": "No aircraft type record"}
+    route = lookup_route(callsign) if callsign else None
+    if route:
+        if not row.get("operator") and route.get("airline"):
+            row["operator"] = route["airline"]
+        row.update({k: v for k, v in route.items() if k != "callsign" and v is not None})
     return row
 
 

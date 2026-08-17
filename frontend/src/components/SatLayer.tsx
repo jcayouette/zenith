@@ -1,4 +1,5 @@
 import { useEffect, useRef, forwardRef, useImperativeHandle } from "react";
+import { canvasDpr, overlayToScreen, type OverlayView } from "@/lib/overlayView";
 
 export type SatPt = {
   x: number;
@@ -57,13 +58,12 @@ type Track = {
 type Props = {
   samples: SatPt[];
   dt: number;
-  fit: number;
   iconScale: number;
   kinds: string[] | null;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onPan?: (dx: number, dy: number) => void;
-  viewZoom?: number;
+  view: OverlayView;
   interactive?: boolean;
 };
 
@@ -77,13 +77,12 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
   {
     samples,
     dt,
-    fit,
     iconScale,
     kinds,
     selectedId,
     onSelect,
     onPan,
-    viewZoom = 1,
+    view,
     interactive = true,
   },
   ref,
@@ -94,17 +93,15 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
   onPanRef.current = onPan;
   const tracksRef = useRef(new Map<string, Track>());
   const dtRef = useRef(dt);
-  const fitRef = useRef(fit);
   const scaleRef = useRef(iconScale);
-  const zoomRef = useRef(viewZoom);
+  const viewRef = useRef(view);
   const kindsRef = useRef(kinds);
   const selectedRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
 
   dtRef.current = dt;
-  fitRef.current = fit;
   scaleRef.current = iconScale;
-  zoomRef.current = viewZoom;
+  viewRef.current = view;
   kindsRef.current = kinds;
   selectedRef.current = selectedId;
   onSelectRef.current = onSelect;
@@ -134,14 +131,14 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
     const resize = () => {
       const w = wrap.clientWidth;
       const h = wrap.clientHeight;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2, 4096 / Math.max(w, 1), 4096 / Math.max(h, 1));
+      if (w < 1 || h < 1) return;
+      const dpr = canvasDpr(w, h);
       const bw = Math.max(1, Math.round(w * dpr));
       const bh = Math.max(1, Math.round(h * dpr));
-      if (canvas.width === bw && canvas.height === bh) return;
-      canvas.width = bw;
-      canvas.height = bh;
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${h}px`;
+      if (canvas.width !== bw || canvas.height !== bh) {
+        canvas.width = bw;
+        canvas.height = bh;
+      }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     resize();
@@ -153,7 +150,7 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
       const h = wrap.clientHeight;
       ctx.clearRect(0, 0, w, h);
       const allow = kindsRef.current ? new Set(kindsRef.current) : null;
-      const fitNow = fitRef.current;
+      const viewNow = viewRef.current;
       const icon = scaleRef.current;
       const selected = selectedRef.current;
       const maxAge = Math.max(dtRef.current * 1.6, 1.2);
@@ -162,11 +159,11 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
         const age = Math.min((now - track.t0) / 1000, maxAge);
         const x = track.x0 + track.vx * age;
         const y = track.y0 + track.vy * age;
-        const [px, py] = overlayToPixel(x, y, fitNow, w, h);
+        const [px, py] = overlayToScreen(x, y, viewNow);
         if (px < -8 || py < -8 || px > w + 8 || py > h + 8) continue;
         const mega = track.kind === "starlink" || track.kind === "oneweb";
         const color = SAT_KIND[track.kind]?.color ?? SAT_KIND.other.color;
-        const size = emojiSize(mega, track.kind === "station", icon) * Math.min(1.85, Math.max(1, Math.sqrt(zoomRef.current)));
+        const size = emojiSize(mega, track.kind === "station", icon);
         const sprite = tintedSatSprite(color, size);
         if (track.id === selected) {
           ctx.strokeStyle = "rgba(255,255,255,0.85)";
@@ -177,13 +174,19 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
         }
         ctx.drawImage(sprite, px - sprite.width / 2, py - sprite.height / 2);
         if (track.id === selected || track.kind === "station") {
+          ctx.font = track.id === selected ? "700 12px ui-sans-serif, system-ui" : "600 11px ui-sans-serif, system-ui";
+          ctx.setLineDash([]);
           ctx.textAlign = "left";
           ctx.textBaseline = "alphabetic";
-          ctx.font = track.id === selected ? "700 12px ui-sans-serif, system-ui" : "600 11px ui-sans-serif, system-ui";
-          ctx.fillStyle = "#041018";
-          ctx.fillText(track.name, px + size * 0.45, py - 6);
+          ctx.lineJoin = "round";
+          ctx.miterLimit = 2;
+          ctx.lineWidth = 3;
+          const tx = Math.round(px + size * 0.45);
+          const ty = Math.round(py - 6);
+          ctx.strokeStyle = "rgba(4,16,24,0.75)";
+          ctx.strokeText(track.name, tx, ty);
           ctx.fillStyle = color;
-          ctx.fillText(track.name, px + size * 0.45 - 0.5, py - 6.5);
+          ctx.fillText(track.name, tx, ty);
         }
       }
       raf = window.requestAnimationFrame(draw);
@@ -200,22 +203,21 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
-    const layoutW = canvas.clientWidth || rect.width;
-    const layoutH = canvas.clientHeight || rect.height;
-    const px = ((clientX - rect.left) / rect.width) * layoutW;
-    const py = ((clientY - rect.top) / rect.height) * layoutH;
-    const [ox, oy] = pixelToOverlay(px, py, fitRef.current, layoutW, layoutH);
+    const clickX = clientX - rect.left;
+    const clickY = clientY - rect.top;
+    const viewNow = viewRef.current;
     const allow = kindsRef.current ? new Set(kindsRef.current) : null;
     const now = performance.now();
     const maxAge = Math.max(dtRef.current * 1.6, 1.2);
     let best: Track | null = null;
-    let bestD = 18 / Math.min(layoutW, layoutH);
+    let bestD = 28;
     for (const track of tracksRef.current.values()) {
       if (allow && !allow.has(track.kind)) continue;
       const age = Math.min((now - track.t0) / 1000, maxAge);
       const x = track.x0 + track.vx * age;
       const y = track.y0 + track.vy * age;
-      const d = Math.hypot(x - ox, y - oy);
+      const [px, py] = overlayToScreen(x, y, viewNow);
+      const d = Math.hypot(px - clickX, py - clickY);
       const pad = track.kind === "station" ? 1.8 : 1.35;
       if (d < bestD * pad) {
         bestD = d;
@@ -318,15 +320,6 @@ function ingest(samples: SatPt[], dt: number, now: number, prev: Map<string, Tra
     if (now - track.t0 < STALE_MS) next.set(id, track);
   }
   return next;
-}
-
-function overlayToPixel(x: number, y: number, fit: number, w: number, h: number): [number, number] {
-  return [(0.5 + (x - 0.5) * fit) * w, (0.5 + (y - 0.5) * fit) * h];
-}
-
-function pixelToOverlay(px: number, py: number, fit: number, w: number, h: number): [number, number] {
-  const f = fit || 1;
-  return [(px / w - 0.5) / f + 0.5, (py / h - 0.5) / f + 0.5];
 }
 
 const spriteCache = new Map<string, HTMLCanvasElement>();

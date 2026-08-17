@@ -1,0 +1,18 @@
+[Unit]
+Description=Zenith all-sky camera
+Documentation=https://github.com/jcayouette/zenith
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/zenith
+Environment=PATH=%h/zenith/backend/.venv/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=ZENITH_DATA=%h/zenith/data
+ExecStart=%h/zenith/backend/.venv/bin/zenith --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

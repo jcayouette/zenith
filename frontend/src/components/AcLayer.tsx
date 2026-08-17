@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { AC_INBOUND, acColor, acPathStroke } from "@/components/AcInspector";
+import { canvasDpr, overlayToScreen, type OverlayView } from "@/lib/overlayView";
 
 export type AcPt = {
   x: number;
@@ -14,6 +15,7 @@ export type AcPt = {
   az?: number;
   alt_m?: number;
   range_km?: number;
+  ground_km?: number;
   gs_kmh?: number;
   heading?: number;
   vrate_ms?: number;
@@ -22,9 +24,10 @@ export type AcPt = {
   cpa_km?: number;
   tca_s?: number;
   inbound?: boolean;
+  rim?: boolean;
   from_x?: number;
   from_y?: number;
-  path?: Array<{ x: number; y: number }>;
+  path?: Array<{ x: number; y: number; alt?: number; ground_km?: number }>;
 };
 
 type Track = {
@@ -41,13 +44,12 @@ type Track = {
 type Props = {
   samples: AcPt[];
   dt: number;
-  fit: number;
   iconScale: number;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onMiss?: (clientX: number, clientY: number) => void;
   onPan?: (dx: number, dy: number) => void;
-  viewZoom?: number;
+  view: OverlayView;
 };
 
 const STALE_MS = 14000;
@@ -55,13 +57,12 @@ const STALE_MS = 14000;
 export default function AcLayer({
   samples,
   dt,
-  fit,
   iconScale,
   selectedId,
   onSelect,
   onMiss,
   onPan,
-  viewZoom = 1,
+  view,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
@@ -69,16 +70,14 @@ export default function AcLayer({
   onPanRef.current = onPan;
   const tracksRef = useRef(new Map<string, Track>());
   const dtRef = useRef(dt);
-  const fitRef = useRef(fit);
   const scaleRef = useRef(iconScale);
-  const zoomRef = useRef(viewZoom);
+  const viewRef = useRef(view);
   const selectedRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
   const onMissRef = useRef(onMiss);
   dtRef.current = dt;
-  fitRef.current = fit;
   scaleRef.current = iconScale;
-  zoomRef.current = viewZoom;
+  viewRef.current = view;
   selectedRef.current = selectedId;
   onSelectRef.current = onSelect;
   onMissRef.current = onMiss;
@@ -98,14 +97,14 @@ export default function AcLayer({
     const resize = () => {
       const w = wrap.clientWidth;
       const h = wrap.clientHeight;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2, 4096 / Math.max(w, 1), 4096 / Math.max(h, 1));
+      if (w < 1 || h < 1) return;
+      const dpr = canvasDpr(w, h);
       const bw = Math.max(1, Math.round(w * dpr));
       const bh = Math.max(1, Math.round(h * dpr));
-      if (canvas.width === bw && canvas.height === bh) return;
-      canvas.width = bw;
-      canvas.height = bh;
-      canvas.style.width = `${w}px`;
-      canvas.style.height = `${h}px`;
+      if (canvas.width !== bw || canvas.height !== bh) {
+        canvas.width = bw;
+        canvas.height = bh;
+      }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
     resize();
@@ -115,31 +114,20 @@ export default function AcLayer({
       const w = wrap.clientWidth;
       const h = wrap.clientHeight;
       ctx.clearRect(0, 0, w, h);
-      const fitNow = fitRef.current;
+      const viewNow = viewRef.current;
       const selected = selectedRef.current;
-      const size = 11 * scaleRef.current * Math.min(1.6, Math.max(1, Math.sqrt(zoomRef.current)));
+      const size = 11 * scaleRef.current;
       const maxAge = Math.max(dtRef.current * 1.4, 4);
       const pulse = 0.55 + 0.45 * Math.sin(now / 320);
       for (const track of tracksRef.current.values()) {
         const inbound = Boolean(track.meta.inbound);
-        const color = acColor(track.meta.alt, inbound);
         const path = track.meta.path;
         if (path && path.length >= 2) {
-          ctx.beginPath();
-          path.forEach((pt, i) => {
-            const [x, y] = overlayToPixel(pt.x, pt.y, fitNow, w, h);
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-          });
-          ctx.strokeStyle = acPathStroke(color, inbound);
-          ctx.lineWidth = inbound ? 1.6 : 1.2;
-          ctx.setLineDash([5, 4]);
-          ctx.stroke();
-          ctx.setLineDash([]);
+          drawHeadingPath(ctx, path, viewNow, track.meta.ground_km, track.meta.gs_kmh);
         }
         if (inbound && track.meta.from_x != null && track.meta.from_y != null) {
-          const [fx, fy] = overlayToPixel(track.meta.from_x, track.meta.from_y, fitNow, w, h);
-          const [cx, cy] = overlayToPixel(0.5, 0.5, fitNow, w, h);
+          const [fx, fy] = overlayToScreen(track.meta.from_x, track.meta.from_y, viewNow);
+          const [cx, cy] = overlayToScreen(0.5, 0.5, viewNow);
           const inward = Math.atan2(cy - fy, cx - fx);
           ctx.beginPath();
           ctx.arc(fx, fy, 5 + pulse * 3, 0, Math.PI * 2);
@@ -158,22 +146,18 @@ export default function AcLayer({
         }
       }
       for (const track of tracksRef.current.values()) {
+        if (track.meta.rim) continue;
         const age = Math.min((now - track.t0) / 1000, maxAge);
         const x = track.x0 + track.vx * age;
         const y = track.y0 + track.vy * age;
-        const [px, py] = overlayToPixel(x, y, fitNow, w, h);
+        const [px, py] = overlayToScreen(x, y, viewNow);
         if (px < -16 || py < -16 || px > w + 16 || py > h + 16) continue;
-        const inbound = Boolean(track.meta.inbound);
-        const color = acColor(track.meta.alt, inbound);
+        const color = acColor(track.meta.ground_km);
         const ang = Math.hypot(track.vx, track.vy) > 1e-8 ? Math.atan2(track.vy, track.vx) + Math.PI / 2 : 0;
+        if (track.id === selected) drawTargetRing(ctx, px, py, size, color, pulse);
         drawAirliner(ctx, px, py, ang, size, color, track.id === selected);
         ctx.font = track.id === selected ? "700 12px ui-sans-serif, system-ui" : "600 11px ui-sans-serif, system-ui";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "alphabetic";
-        ctx.fillStyle = "#041018";
-        ctx.fillText(track.name, px + size * 0.9, py - 4);
-        ctx.fillStyle = color;
-        ctx.fillText(track.name, px + size * 0.9 - 0.5, py - 4.5);
+        drawHudLabel(ctx, track.name, px + size * 0.9, py - 4, color);
       }
       raf = window.requestAnimationFrame(draw);
     };
@@ -189,22 +173,22 @@ export default function AcLayer({
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     if (rect.width < 1 || rect.height < 1) return;
-    const layoutW = canvas.clientWidth || rect.width;
-    const layoutH = canvas.clientHeight || rect.height;
-    const px = ((clientX - rect.left) / rect.width) * layoutW;
-    const py = ((clientY - rect.top) / rect.height) * layoutH;
-    const [ox, oy] = pixelToOverlay(px, py, fitRef.current, layoutW, layoutH);
+    const clickX = clientX - rect.left;
+    const clickY = clientY - rect.top;
+    const viewNow = viewRef.current;
     const now = performance.now();
     const maxAge = Math.max(dtRef.current * 1.4, 4);
     let best: Track | null = null;
-    let bestD = 24 / Math.min(layoutW, layoutH);
+    let bestD = 32;
     for (const track of tracksRef.current.values()) {
       const age = Math.min((now - track.t0) / 1000, maxAge);
       const x = track.x0 + track.vx * age;
       const y = track.y0 + track.vy * age;
-      let d = Math.hypot(x - ox, y - oy);
+      const [px, py] = overlayToScreen(x, y, viewNow);
+      let d = Math.hypot(px - clickX, py - clickY);
       if (track.meta.from_x != null && track.meta.from_y != null) {
-        d = Math.min(d, Math.hypot(track.meta.from_x - ox, track.meta.from_y - oy));
+        const [fx, fy] = overlayToScreen(track.meta.from_x, track.meta.from_y, viewNow);
+        d = Math.min(d, Math.hypot(fx - clickX, fy - clickY));
       }
       if (d < bestD) {
         bestD = d;
@@ -283,13 +267,103 @@ function ingest(samples: AcPt[], dt: number, now: number, prev: Map<string, Trac
   return next;
 }
 
-function overlayToPixel(x: number, y: number, fit: number, w: number, h: number): [number, number] {
-  return [(0.5 + (x - 0.5) * fit) * w, (0.5 + (y - 0.5) * fit) * h];
+function drawHeadingPath(
+  ctx: CanvasRenderingContext2D,
+  path: Array<{ x: number; y: number; alt?: number; ground_km?: number }>,
+  view: OverlayView,
+  groundKm?: number,
+  speedKmh?: number,
+) {
+  ctx.setLineDash([6, 4]);
+  ctx.lineWidth = 1.65;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  let prev = overlayToScreen(path[0].x, path[0].y, view);
+  let last = prev;
+  for (let i = 1; i < path.length; i++) {
+    const cur = overlayToScreen(path[i].x, path[i].y, view);
+    const km = path[i].ground_km ?? path[i - 1].ground_km ?? groundKm;
+    ctx.beginPath();
+    ctx.moveTo(prev[0], prev[1]);
+    ctx.lineTo(cur[0], cur[1]);
+    ctx.strokeStyle = acPathStroke(acColor(km));
+    ctx.stroke();
+    prev = cur;
+    last = cur;
+  }
+  ctx.setLineDash([]);
+  if (speedKmh != null && Number.isFinite(speedKmh) && speedKmh > 0) {
+    const label = `${Math.round(speedKmh)} km/h`;
+    ctx.font = "600 10px ui-sans-serif, system-ui";
+    drawHudLabel(ctx, label, last[0], last[1] - 3, acColor(path[path.length - 1]?.ground_km ?? groundKm), "center", "bottom");
+  }
 }
 
-function pixelToOverlay(px: number, py: number, fit: number, w: number, h: number): [number, number] {
-  const f = fit || 1;
-  return [(px / w - 0.5) / f + 0.5, (py / h - 0.5) / f + 0.5];
+function drawHudLabel(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  color: string,
+  align: CanvasTextAlign = "left",
+  baseline: CanvasTextBaseline = "alphabetic",
+) {
+  const tx = Math.round(x);
+  const ty = Math.round(y);
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.textAlign = align;
+  ctx.textBaseline = baseline;
+  ctx.lineJoin = "round";
+  ctx.miterLimit = 2;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(4,16,24,0.75)";
+  ctx.strokeText(text, tx, ty);
+  ctx.fillStyle = color;
+  ctx.fillText(text, tx, ty);
+  ctx.restore();
+}
+
+function drawTargetRing(
+  ctx: CanvasRenderingContext2D,
+  px: number,
+  py: number,
+  size: number,
+  color: string,
+  pulse: number,
+) {
+  const r = size * 1.85 + pulse * 1.1;
+  ctx.save();
+  ctx.translate(px, py);
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.strokeStyle = "rgba(4,16,24,0.7)";
+  ctx.lineWidth = 3.2;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.7;
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255,0.92)";
+  ctx.lineWidth = 1.35;
+  ctx.lineCap = "round";
+  const gap = 0.28;
+  for (let i = 0; i < 4; i++) {
+    const a0 = (i * Math.PI) / 2 + gap;
+    const a1 = ((i + 1) * Math.PI) / 2 - gap;
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 5, a0, a1);
+    ctx.stroke();
+    const mid = (i * Math.PI) / 2;
+    const c = Math.cos(mid);
+    const s = Math.sin(mid);
+    ctx.beginPath();
+    ctx.moveTo(c * (r - 2), s * (r - 2));
+    ctx.lineTo(c * (r + 8), s * (r + 8));
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawAirliner(

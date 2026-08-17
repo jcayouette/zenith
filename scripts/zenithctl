@@ -1,0 +1,158 @@
+#!/bin/sh
+# Native operator helper. Taskfile.yml is the public CLI.
+# Later: ZENITH_RUNTIME=compose with the same start/stop/restart verbs.
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+RUNTIME=${ZENITH_RUNTIME:-native}
+HOST=${ZENITH_HOST:-0.0.0.0}
+PORT=${ZENITH_PORT:-8000}
+DATA=${ZENITH_DATA:-$ROOT/data}
+BIN=$ROOT/backend/.venv/bin/zenith
+UNIT_SRC=$ROOT/deploy/native/zenith.service
+UNIT_DST=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/zenith.service
+PATTERN=$BIN' --host'
+
+die() {
+  echo "zenithctl: $*" >&2
+  exit 1
+}
+
+need_native() {
+  if [ "$RUNTIME" != native ]; then
+    die "ZENITH_RUNTIME=$RUNTIME is not wired yet. Use native (systemd) for now."
+  fi
+}
+
+need_bin() {
+  [ -x "$BIN" ] || die "missing $BIN — create backend/.venv and pip install -e backend"
+}
+
+unit_loaded() {
+  systemctl --user cat zenith.service >/dev/null 2>&1
+}
+
+stray_pids() {
+  pgrep -u "$(id -u)" -f "$PATTERN" 2>/dev/null || true
+}
+
+stop_strays() {
+  pids=$(stray_pids)
+  [ -n "$pids" ] || return 0
+  echo "Stopping Zenith pid(s): $pids"
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+  i=0
+  while [ "$i" -lt 10 ]; do
+    pids=$(stray_pids)
+    [ -z "$pids" ] && return 0
+    sleep 1
+    i=$((i + 1))
+  done
+  pids=$(stray_pids)
+  [ -z "$pids" ] && return 0
+  echo "Forcing stop of pid(s): $pids"
+  # shellcheck disable=SC2086
+  kill -9 $pids 2>/dev/null || true
+}
+
+cmd_install() {
+  need_native
+  need_bin
+  mkdir -p "$(dirname "$UNIT_DST")"
+  cp "$UNIT_SRC" "$UNIT_DST"
+  systemctl --user daemon-reload
+  systemctl --user enable zenith.service
+  if command -v loginctl >/dev/null 2>&1; then
+    if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+      echo "Linger enabled — Zenith will start at boot."
+    else
+      echo "Enable boot-start with: sudo loginctl enable-linger $(id -un)"
+    fi
+  fi
+  echo "Installed $UNIT_DST"
+  echo "Start with: task start"
+}
+
+cmd_uninstall() {
+  need_native
+  if unit_loaded; then
+    systemctl --user disable --now zenith.service 2>/dev/null || true
+  fi
+  rm -f "$UNIT_DST"
+  systemctl --user daemon-reload 2>/dev/null || true
+  echo "Removed systemd user unit."
+}
+
+cmd_start() {
+  need_native
+  need_bin
+  unit_loaded || die "systemd unit not installed. Run: task install"
+  if systemctl --user is-active --quiet zenith.service; then
+    echo "Zenith is already running."
+    cmd_status
+    return 0
+  fi
+  stop_strays
+  mkdir -p "$DATA"
+  systemctl --user start zenith.service
+  cmd_status
+}
+
+cmd_stop() {
+  need_native
+  if unit_loaded; then
+    systemctl --user stop zenith.service 2>/dev/null || true
+  fi
+  stop_strays
+  echo "Zenith stopped."
+}
+
+cmd_restart() {
+  need_native
+  need_bin
+  unit_loaded || die "systemd unit not installed. Run: task install"
+  stop_strays
+  systemctl --user restart zenith.service
+  cmd_status
+}
+
+cmd_status() {
+  need_native
+  if unit_loaded; then
+    systemctl --user --no-pager --lines=8 status zenith.service || true
+  else
+    echo "systemd unit not installed (task install)."
+  fi
+  pids=$(stray_pids)
+  if [ -n "$pids" ]; then
+    echo "process: $pids  http://127.0.0.1:${PORT}/"
+  else
+    echo "process: not running"
+  fi
+}
+
+cmd_logs() {
+  need_native
+  unit_loaded || die "systemd unit not installed. Run: task install"
+  exec journalctl --user -u zenith.service -f
+}
+
+usage() {
+  cat <<EOF
+usage: zenithctl <start|stop|restart|status|logs|install|uninstall>
+EOF
+}
+
+[ $# -ge 1 ] || { usage >&2; exit 2; }
+case $1 in
+  start) cmd_start ;;
+  stop) cmd_stop ;;
+  restart) cmd_restart ;;
+  status) cmd_status ;;
+  logs) cmd_logs ;;
+  install) cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  -h|--help|help) usage ;;
+  *) die "unknown command: $1" ;;
+esac

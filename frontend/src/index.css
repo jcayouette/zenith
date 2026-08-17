@@ -58,3 +58,8 @@ body {
   border-radius: 0;
   aspect-ratio: auto;
 }
+
+.zenith-leaflet.leaflet-container {
+  background: transparent;
+  font: inherit;
+}

@@ -3,28 +3,26 @@ import SkyCard, { Metric, Row } from "@/components/SkyCard";
 export const AC_COLOR = "#e2e8f0";
 export const AC_INBOUND = "#4ade80";
 export const AC_YELLOW = "#facc15";
-export const AC_ORANGE = "#fb923c";
 export const AC_RED = "#f87171";
 
-/** Elevation traffic light: 0–20 yellow, 20–30 orange, 30+ red from any azimuth. */
-export function acBand(alt?: number): "yellow" | "orange" | "red" | null {
-  if (alt == null || !Number.isFinite(alt)) return null;
-  if (alt >= 30) return "red";
-  if (alt >= 20) return "orange";
-  if (alt >= 0) return "yellow";
-  return null;
+/** Ground-range traffic light on the 80 km disk: red near the site, green at the rim. */
+export function acBand(groundKm?: number): "green" | "yellow" | "red" | null {
+  if (groundKm == null || !Number.isFinite(groundKm)) return null;
+  if (groundKm < 22) return "red";
+  if (groundKm < 48) return "yellow";
+  return "green";
 }
 
-export function acColor(alt?: number, inbound?: boolean): string {
-  const band = acBand(alt);
+export function acColor(groundKm?: number): string {
+  const band = acBand(groundKm);
   if (band === "red") return AC_RED;
-  if (band === "orange") return AC_ORANGE;
   if (band === "yellow") return AC_YELLOW;
-  return inbound ? AC_INBOUND : AC_COLOR;
+  if (band === "green") return AC_INBOUND;
+  return AC_COLOR;
 }
 
-export function acPathStroke(color: string, inbound: boolean): string {
-  const alpha = inbound ? 0.5 : 0.38;
+export function acPathStroke(color: string): string {
+  const alpha = 0.72;
   if (color.startsWith("#") && (color.length === 7 || color.length === 4)) {
     const hex = color.length === 4 ? `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}` : color;
     const n = Number.parseInt(hex.slice(1), 16);
@@ -45,6 +43,7 @@ export type AcLive = {
   az?: number;
   alt_m?: number;
   range_km?: number;
+  ground_km?: number;
   gs_kmh?: number;
   heading?: number;
   vrate_ms?: number;
@@ -53,9 +52,19 @@ export type AcLive = {
   cpa_km?: number;
   tca_s?: number;
   inbound?: boolean;
+  rim?: boolean;
   from_x?: number;
   from_y?: number;
-  path?: Array<{ x: number; y: number }>;
+  path?: Array<{ x: number; y: number; alt?: number; ground_km?: number }>;
+};
+
+export type AcAirport = {
+  code?: string | null;
+  iata?: string | null;
+  icao?: string | null;
+  city?: string | null;
+  name?: string | null;
+  label?: string | null;
 };
 
 export type AcMeta = {
@@ -65,6 +74,10 @@ export type AcMeta = {
   manufacturer?: string | null;
   registration?: string | null;
   operator?: string | null;
+  airline?: string | null;
+  route?: string | null;
+  origin?: AcAirport | null;
+  destination?: AcAirport | null;
   label?: string | null;
   error?: string;
 };
@@ -78,13 +91,20 @@ type Props = {
 
 export default function AcInspector({ ac, meta, loading, onClose }: Props) {
   const inbound = Boolean(ac.inbound);
-  const band = acBand(ac.alt);
-  const accent = acColor(ac.alt, inbound);
+  const band = acBand(ac.ground_km);
+  const accent = acColor(ac.ground_km);
   const typeLabel = meta?.label || [meta?.manufacturer, meta?.model].filter(Boolean).join(" ");
   const kicker =
     band === "red"
-      ? "Danger overhead"
-      : meta?.typecode || (band === "orange" ? "High" : band === "yellow" ? "Horizon" : inbound ? "Inbound" : ac.category || "Aircraft");
+      ? "Near"
+      : meta?.typecode ||
+        (band === "yellow"
+          ? "Mid range"
+          : band === "green"
+            ? "Edge"
+            : inbound
+              ? "Inbound"
+              : ac.category || "Aircraft");
   return (
     <SkyCard
       accent={accent}
@@ -116,13 +136,15 @@ export default function AcInspector({ ac, meta, loading, onClose }: Props) {
       </dl>
       <dl className="space-y-1.5 px-3.5 py-3 text-[11px]">
         <Row label="Callsign" value={ac.name || "—"} />
+        {meta?.origin?.label ? <Row label="From" value={meta.origin.label} wrap /> : null}
+        {meta?.destination?.label ? <Row label="To" value={meta.destination.label} wrap /> : null}
         {meta?.registration ? <Row label="Tail" value={meta.registration} /> : null}
         {meta?.operator ? <Row label="Operator" value={meta.operator} /> : null}
         {meta?.typecode ? <Row label="ICAO" value={meta.typecode} /> : null}
         <Row label="ICAO24" value={ac.icao24 || ac.id || "—"} />
         {ac.country ? <Row label="Country" value={ac.country} /> : null}
         {ac.alt_m != null ? <Row label="Height" value={`${Math.round(ac.alt_m)} m`} /> : null}
-        {ac.range_km != null ? <Row label="Range" value={`${fmtKm(ac.range_km)} km`} /> : null}
+        {ac.ground_km != null ? <Row label="Range" value={`${fmtKm(ac.ground_km)} km`} /> : null}
         {ac.gs_kmh != null ? <Row label="Speed" value={`${Math.round(ac.gs_kmh)} km/h`} /> : null}
         {ac.heading != null ? <Row label="Track" value={`${Math.round(ac.heading)}°`} /> : null}
         {inbound && ac.tca_s != null && ac.tca_s > 0 ? <Row label="Overhead" value={fmtEta(ac.tca_s)} /> : null}

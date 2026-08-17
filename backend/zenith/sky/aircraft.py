@@ -1,10 +1,9 @@
-"""Live aircraft from OpenSky Network, projected onto the all-sky overlay."""
+"""Live aircraft from OpenSky / ADS-B, plotted on a flat ground-range overlay."""
 
 from __future__ import annotations
 
 import json
 import math
-import os
 import threading
 import urllib.error
 import urllib.request
@@ -14,16 +13,42 @@ import numpy as np
 
 from zenith.config.schema import ZenithSettings
 from zenith.sky.layers import OVERLAY_BAKE_HORIZON, _norm, _proj_kw
-from zenith.sky.project import altaz_to_xy
+from zenith.sky.project import rangeaz_to_xy
 from zenith.sky.tle import USER_AGENT, WGS84_A, WGS84_E2
 
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
-CACHE_S = 10.0
+ADSBD_URL = "https://api.adsb.lol/v2/lat/{lat}/lon/{lon}/dist/{nm}"
+CACHE_S = 25.0
 LOOKAHEAD_S = 8.0
-HORIZON_KM = 420.0
+MAP_RANGE_KM = 80.0
+FETCH_KM = 420.0
 CPA_KM = 50.0
 MAX_TCA_S = 90 * 60.0
+HEADING_KM = 10.0
 M_PER_DEG = 111_320.0
+KT_MS = 0.514444
+FT_M = 0.3048
+FPM_MS = 0.00508
+ADSB_CAT = {
+    "A0": 1,
+    "A1": 1,
+    "A2": 2,
+    "A3": 3,
+    "A4": 4,
+    "A5": 5,
+    "A6": 6,
+    "A7": 7,
+    "B0": 8,
+    "B1": 9,
+    "B2": 10,
+    "B3": 11,
+    "B4": 13,
+    "B6": 14,
+    "B7": 15,
+    "C0": 16,
+    "C1": 17,
+    "C2": 18,
+}
 
 CATEGORY = {
     0: "Unknown",
@@ -46,7 +71,14 @@ CATEGORY = {
     18: "Law enforcement",
 }
 
-_cache: dict = {"key": None, "at": 0.0, "states": [], "error": None}
+_cache: dict = {
+    "key": None,
+    "at": 0.0,
+    "states": [],
+    "error": None,
+    "source": "opensky",
+    "backoff_until": 0.0,
+}
 _lock = threading.Lock()
 
 
@@ -74,11 +106,14 @@ def build_aircraft(
     )
     planes = _project(states, loc.latitude, loc.longitude, loc.elevation_m, now_s, **proj)
     inbound = sum(1 for p in planes if p.get("inbound"))
+    with _lock:
+        source = _cache.get("source") or "opensky"
     return {
         "when": utc.isoformat(timespec="seconds"),
         "dt": LOOKAHEAD_S,
-        "source": "opensky",
+        "source": source,
         "cpa_km": CPA_KM,
+        "map_km": MAP_RANGE_KM,
         "aircraft": planes,
         "count": len(planes),
         "inbound": inbound,
@@ -120,6 +155,54 @@ def look_azel_geodetic(
     return az, el, rng
 
 
+def llh_along_look(
+    az_deg: np.ndarray | float,
+    el_deg: np.ndarray | float,
+    height_m: float,
+    obs_lat: float,
+    obs_lon: float,
+    obs_alt_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Lat/lon of the point at ``height_m`` along a look ray (inverse of look_azel_geodetic)."""
+    az = np.deg2rad(np.asarray(az_deg, dtype=np.float64))
+    el = np.deg2rad(np.asarray(el_deg, dtype=np.float64))
+    obs = _geodetic_to_ecef(np.asarray(obs_lat), np.asarray(obs_lon), np.asarray(obs_alt_m / 1000.0))
+    lat_r, lon_r = math.radians(obs_lat), math.radians(obs_lon)
+    sl, cl, s0, c0 = math.sin(lat_r), math.cos(lat_r), math.sin(lon_r), math.cos(lon_r)
+    east = np.cos(el) * np.sin(az)
+    north = np.cos(el) * np.cos(az)
+    up = np.sin(el)
+    dx = -s0 * east - sl * c0 * north + cl * c0 * up
+    dy = c0 * east - sl * s0 * north + cl * s0 * up
+    dz = cl * north + sl * up
+    sine = np.clip(np.sin(el), 1e-3, None)
+    s = np.clip((height_m - obs_alt_m) / 1000.0 / sine, 0.0, 500.0)
+    for _ in range(4):
+        lat, lon, alt_m = _ecef_to_geodetic(obs[0] + dx * s, obs[1] + dy * s, obs[2] + dz * s)
+        s = np.clip(s + (height_m - alt_m) / 1000.0 / sine, 0.0, 500.0)
+    lat, lon, alt_m = _ecef_to_geodetic(obs[0] + dx * s, obs[1] + dy * s, obs[2] + dz * s)
+    if np.ndim(az_deg) == 0:
+        return float(lat), float(lon), float(alt_m)
+    return lat, lon, alt_m
+
+
+def _ecef_to_geodetic(x, y, z) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    z = np.asarray(z, dtype=np.float64)
+    lon = np.arctan2(y, x)
+    p = np.hypot(x, y)
+    lat = np.arctan2(z, p * (1.0 - WGS84_E2))
+    for _ in range(5):
+        sinlat = np.sin(lat)
+        n = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sinlat**2)
+        lat = np.arctan2(z + n * WGS84_E2 * sinlat, p)
+    sinlat = np.sin(lat)
+    n = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sinlat**2)
+    alt_km = p / np.clip(np.cos(lat), 1e-6, None) - n
+    return np.degrees(lat), np.degrees(lon), alt_km * 1000.0
+
+
 def offset_llh(
     lat: np.ndarray,
     lon: np.ndarray,
@@ -157,8 +240,7 @@ def closest_approach(
     lon_a = np.asarray(lon, dtype=np.float64)
     track = np.deg2rad(np.asarray(track_deg, dtype=np.float64))
     speed = np.asarray(speed_ms, dtype=np.float64)
-    deast = (lon_a - obs_lon) * M_PER_DEG * math.cos(math.radians(obs_lat)) / 1000.0
-    dnorth = (lat_a - obs_lat) * M_PER_DEG / 1000.0
+    deast, dnorth = _enu_km(lat_a, lon_a, obs_lat, obs_lon)
     ve = speed * np.sin(track) / 1000.0
     vn = speed * np.cos(track) / 1000.0
     horiz = np.hypot(deast, dnorth)
@@ -170,7 +252,57 @@ def closest_approach(
     return cpa, tca, horiz
 
 
-def bbox_for_site(lat: float, lon: float, radius_km: float = HORIZON_KM) -> tuple[float, float, float, float]:
+def _enu_km(
+    lat: np.ndarray | float,
+    lon: np.ndarray | float,
+    obs_lat: float,
+    obs_lon: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """East/north kilometres from the site on a local tangent plane."""
+    lat_a = np.asarray(lat, dtype=np.float64)
+    lon_a = np.asarray(lon, dtype=np.float64)
+    deast = (lon_a - obs_lon) * M_PER_DEG * math.cos(math.radians(obs_lat)) / 1000.0
+    dnorth = (lat_a - obs_lat) * M_PER_DEG / 1000.0
+    return deast, dnorth
+
+
+def enu_az_range(
+    lat: np.ndarray | float,
+    lon: np.ndarray | float,
+    obs_lat: float,
+    obs_lon: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """True-north azimuth (deg) and ground range (km) on the same plane as the map."""
+    deast, dnorth = _enu_km(lat, lon, obs_lat, obs_lon)
+    horiz = np.hypot(deast, dnorth)
+    az = np.degrees(np.arctan2(deast, dnorth)) % 360.0
+    if np.ndim(lat) == 0 and np.ndim(lon) == 0:
+        return float(az), float(horiz)
+    return az, horiz
+
+
+def llh_at_range_az(
+    az_deg: np.ndarray | float,
+    range_km: np.ndarray | float,
+    obs_lat: float,
+    obs_lon: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Inverse of ``enu_az_range``: lat/lon at a ground range and azimuth from the site."""
+    az = np.deg2rad(np.asarray(az_deg, dtype=np.float64))
+    rng = np.asarray(range_km, dtype=np.float64)
+    dnorth = rng * np.cos(az)
+    deast = rng * np.sin(az)
+    dlat = dnorth * 1000.0 / M_PER_DEG
+    coslat = max(1e-6, abs(math.cos(math.radians(obs_lat))))
+    dlon = deast * 1000.0 / (M_PER_DEG * coslat)
+    lat = obs_lat + dlat
+    lon = obs_lon + dlon
+    if np.ndim(az_deg) == 0 and np.ndim(range_km) == 0:
+        return float(lat), float(lon)
+    return lat, lon
+
+
+def bbox_for_site(lat: float, lon: float, radius_km: float = FETCH_KM) -> tuple[float, float, float, float]:
     dlat = radius_km / 111.32
     coslat = max(0.2, abs(math.cos(math.radians(lat))))
     dlon = radius_km / (111.32 * coslat)
@@ -190,47 +322,154 @@ def _geodetic_to_ecef(lat_deg: np.ndarray, lon_deg: np.ndarray, alt_km: np.ndarr
 def _states(lat: float, lon: float, now_s: float) -> tuple[list, str | None]:
     key = (round(lat, 2), round(lon, 2))
     with _lock:
-        if _cache["key"] == key and now_s - _cache["at"] < CACHE_S and (_cache["states"] or _cache["error"]):
+        fresh = _cache["key"] == key and now_s - _cache["at"] < CACHE_S
+        if fresh and (_cache["states"] or _cache["error"]):
             return _cache["states"], _cache["error"]
-    rows, err = _fetch(lat, lon)
+    rows, err, source = _fetch(lat, lon, now_s)
     with _lock:
-        if rows or not _cache["states"]:
-            _cache["key"] = key
-            _cache["at"] = now_s
-            _cache["states"] = rows
-            _cache["error"] = err
-            return rows, err
-        age = now_s - _cache["at"]
-        stale = f"{err}; using {age:.0f}s-old cache" if err else _cache["error"]
-        return _cache["states"], stale
+        if rows:
+            _cache.update(key=key, at=now_s, states=rows, error=None, source=source)
+            return rows, None
+        if _cache["states"]:
+            age = now_s - _cache["at"]
+            stale = f"{err}; using {age:.0f}s-old cache" if err else _cache["error"]
+            _cache["error"] = stale
+            return _cache["states"], stale
+        _cache.update(key=key, at=now_s, states=[], error=err, source=source)
+        return [], err
 
 
-def _fetch(lat: float, lon: float) -> tuple[list, str | None]:
+def parse_adsb_ac(payload: dict, now_s: float) -> list:
+    """Convert an adsb.lol / readsb-style JSON dump into OpenSky state rows."""
+    rows = payload.get("ac") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return []
+    stamp = payload.get("now")
+    if isinstance(stamp, (int, float)):
+        now_s = float(stamp) / 1000.0 if stamp > 1e12 else float(stamp)
+    out: list = []
+    for ac in rows:
+        if not isinstance(ac, dict):
+            continue
+        lat, lon = ac.get("lat"), ac.get("lon")
+        if lat is None or lon is None:
+            continue
+        if ac.get("alt_baro") == "ground":
+            continue
+        alt = _feet_m(ac.get("alt_geom")) or _feet_m(ac.get("alt_baro"))
+        if alt is None:
+            continue
+        gs = ac.get("gs")
+        vel = float(gs) * KT_MS if gs is not None else 0.0
+        rate = ac.get("baro_rate")
+        if rate is None:
+            rate = ac.get("geom_rate") or 0
+        seen = ac.get("seen_pos")
+        if seen is None:
+            seen = ac.get("seen") or 0
+        tpos = now_s - float(seen)
+        hexid = str(ac.get("hex") or "").lower().lstrip("~")
+        flight = (ac.get("flight") or "").strip()
+        out.append(
+            [
+                hexid,
+                flight,
+                "",
+                int(tpos),
+                int(now_s),
+                float(lon),
+                float(lat),
+                alt,
+                False,
+                vel,
+                float(ac.get("track") or 0),
+                float(rate) * FPM_MS,
+                None,
+                alt,
+                str(ac.get("squawk") or "") or None,
+                False,
+                0,
+                ADSB_CAT.get(str(ac.get("category") or ""), 0),
+            ]
+        )
+    return out
+
+
+def _feet_m(value) -> float | None:
+    if value is None or value == "ground":
+        return None
+    try:
+        return float(value) * FT_M
+    except (TypeError, ValueError):
+        return None
+
+
+def _fetch(lat: float, lon: float, now_s: float) -> tuple[list, str | None, str]:
+    skip_opensky = False
+    with _lock:
+        skip_opensky = now_s < float(_cache.get("backoff_until") or 0)
+    if not skip_opensky:
+        rows, err, retry_s = _fetch_opensky(lat, lon)
+        if rows:
+            with _lock:
+                _cache["backoff_until"] = 0.0
+            return rows, None, "opensky"
+        if retry_s:
+            with _lock:
+                _cache["backoff_until"] = now_s + retry_s
+        elif not err:
+            return [], None, "opensky"
+        adsb, adsb_err = _fetch_adsblol(lat, lon, now_s)
+        if adsb:
+            return adsb, None, "adsb.lol"
+        return [], err or adsb_err, "opensky"
+    adsb, adsb_err = _fetch_adsblol(lat, lon, now_s)
+    if adsb:
+        return adsb, None, "adsb.lol"
+    return [], adsb_err, "adsb.lol"
+
+
+def _fetch_opensky(lat: float, lon: float) -> tuple[list, str | None, float]:
     lamin, lomin, lamax, lomax = bbox_for_site(lat, lon)
     url = (
         f"{OPENSKY_URL}?lamin={lamin:.3f}&lomin={lomin:.3f}"
         f"&lamax={lamax:.3f}&lomax={lomax:.3f}"
     )
-    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
-    user = os.environ.get("OPENSKY_USERNAME", "").strip()
-    password = os.environ.get("OPENSKY_PASSWORD", "").strip()
-    req = urllib.request.Request(url, headers=headers)
-    if user:
-        import base64
-
-        token = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
-        req.add_header("Authorization", f"Basic {token}")
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=12) as resp:
             payload = json.loads(resp.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
-        return [], f"OpenSky HTTP {exc.code}"
+        retry = 120.0
+        if exc.headers:
+            raw = exc.headers.get("X-Rate-Limit-Retry-After-Seconds")
+            if raw:
+                try:
+                    retry = max(30.0, float(raw))
+                except ValueError:
+                    pass
+        return [], f"OpenSky HTTP {exc.code}", retry if exc.code == 429 else 0.0
     except (OSError, json.JSONDecodeError) as exc:
-        return [], f"OpenSky: {exc}"
+        return [], f"OpenSky: {exc}", 0.0
     states = payload.get("states") if isinstance(payload, dict) else None
     if not states:
-        return [], None
-    return states, None
+        return [], None, 0.0
+    return states, None, 0.0
+
+
+def _fetch_adsblol(lat: float, lon: float, now_s: float) -> tuple[list, str | None]:
+    nm = max(40, int(round(FETCH_KM / 1.852)))
+    url = ADSBD_URL.format(lat=f"{lat:.4f}", lon=f"{lon:.4f}", nm=nm)
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        return [], f"ADS-B HTTP {exc.code}"
+    except (OSError, json.JSONDecodeError) as exc:
+        return [], f"ADS-B: {exc}"
+    rows = parse_adsb_ac(payload, now_s) if isinstance(payload, dict) else []
+    return rows, None if rows else "ADS-B: no aircraft in range"
 
 
 def _project(states: list, obs_lat: float, obs_lon: float, obs_alt_m: float, now_s: float, **proj) -> list[dict]:
@@ -274,25 +513,35 @@ def _project(states: list, obs_lat: float, obs_lon: float, obs_alt_m: float, now
     lat1, lon1, alt1 = offset_llh(lat_a, lon_a, alt_a, track_a, spd_a, vr_a, age_a)
     lat2, lon2, alt2 = offset_llh(lat1, lon1, alt1, track_a, spd_a, vr_a, LOOKAHEAD_S)
     az, el, rng = look_azel_geodetic(lat1, lon1, alt1, obs_lat, obs_lon, obs_alt_m)
-    az2, el2, _rng2 = look_azel_geodetic(lat2, lon2, alt2, obs_lat, obs_lon, obs_alt_m)
     cpa, tca, horiz = closest_approach(lat1, lon1, track_a, spd_a, obs_lat, obs_lon)
-    nearby = horiz <= CPA_KM
+    map_az, _h = enu_az_range(lat1, lon1, obs_lat, obs_lon)
+    map_az2, horiz2 = enu_az_range(lat2, lon2, obs_lat, obs_lon)
     inbound = (tca > 30.0) & (tca <= MAX_TCA_S) & (cpa <= CPA_KM)
-    pick = (el >= 0) & (nearby | inbound)
+    inside = (el >= 0) & (horiz <= MAP_RANGE_KM)
+    pick = inside | inbound
     if not np.any(pick):
         return []
-    xs, ys, vis = altaz_to_xy(el, az, proj["width"], proj["height"], **_proj_kw(proj))
-    nxs, nys, nvis = altaz_to_xy(el2, az2, proj["width"], proj["height"], **_proj_kw(proj))
-    oxs, oys, ovis = altaz_to_xy(
-        np.zeros_like(az), az, proj["width"], proj["height"], **_proj_kw(proj)
+    kw = {**_proj_kw(proj), "max_range_km": MAP_RANGE_KM}
+    xs, ys, vis = rangeaz_to_xy(horiz, map_az, proj["width"], proj["height"], **kw)
+    nxs, nys, nvis = rangeaz_to_xy(horiz2, map_az2, proj["width"], proj["height"], **kw)
+    oxs, oys, ovis = rangeaz_to_xy(
+        np.full_like(map_az, MAP_RANGE_KM), map_az, proj["width"], proj["height"], **kw
     )
-    kw = _proj_kw(proj)
     out: list[dict] = []
     for i, show in enumerate(pick):
-        if not show or not vis[i]:
+        if not show:
             continue
-        pt = _norm(float(xs[i]), float(ys[i]), proj["width"], proj["height"])
         coming = bool(inbound[i])
+        on_disk = bool(inside[i] and vis[i])
+        rim = coming and not on_disk
+        if rim and not ovis[i]:
+            continue
+        if not rim and not vis[i]:
+            continue
+        if rim:
+            pt = _norm(float(oxs[i]), float(oys[i]), proj["width"], proj["height"])
+        else:
+            pt = _norm(float(xs[i]), float(ys[i]), proj["width"], proj["height"])
         pt.update(
             {
                 "id": icao[i],
@@ -303,6 +552,7 @@ def _project(states: list, obs_lat: float, obs_lon: float, obs_alt_m: float, now
                 "az": round(float(az[i]), 1),
                 "alt_m": round(float(alt1[i]), 0),
                 "range_km": round(float(rng[i]), 1),
+                "ground_km": round(float(horiz[i]), 1),
                 "gs_kmh": round(float(spd_a[i]) * 3.6, 0) if spd_a[i] else None,
                 "heading": round(float(track_a[i]), 0) if spd_a[i] or track_a[i] else None,
                 "vrate_ms": round(float(vr_a[i]), 1) if vr_a[i] else 0.0,
@@ -311,54 +561,55 @@ def _project(states: list, obs_lat: float, obs_lon: float, obs_alt_m: float, now
                 "cpa_km": round(float(cpa[i]), 1),
                 "tca_s": round(float(tca[i]), 0),
                 "inbound": coming,
+                "rim": rim,
             }
         )
-        if nvis[i]:
+        if on_disk and nvis[i]:
             pt["x2"] = round(float(nxs[i]) / (proj["width"] or 1), 5)
             pt["y2"] = round(float(nys[i]) / (proj["height"] or 1), 5)
         if coming and ovis[i]:
             origin = _norm(float(oxs[i]), float(oys[i]), proj["width"], proj["height"])
             pt["from_x"] = origin["x"]
             pt["from_y"] = origin["y"]
-        path_end = min(max(float(tca[i]), 0.0) + 180.0, 45 * 60.0)
-        pt["path"] = _predict_path(
-            float(lat1[i]),
-            float(lon1[i]),
-            float(alt1[i]),
-            float(track_a[i]),
-            float(spd_a[i]),
-            float(vr_a[i]),
-            path_end,
-            obs_lat,
-            obs_lon,
-            obs_alt_m,
-            proj["width"],
-            proj["height"],
-            kw,
-        )
+        path: list[dict] = []
+        if on_disk:
+            path = _heading_path(
+                float(lat1[i]),
+                float(lon1[i]),
+                float(alt1[i]),
+                float(track_a[i]),
+                float(spd_a[i]),
+                float(vr_a[i]),
+                obs_lat,
+                obs_lon,
+                proj["width"],
+                proj["height"],
+                kw,
+            )
+        pt["path"] = path
         out.append(pt)
     out.sort(key=lambda row: (not row.get("inbound"), row.get("cpa_km", 99), -(row.get("alt") or 0)))
     return out
 
 
-def _predict_path(
+def _heading_path(
     lat: float,
     lon: float,
     alt_m: float,
     track: float,
     speed_ms: float,
     vrate: float,
-    end_s: float,
     obs_lat: float,
     obs_lon: float,
-    obs_alt_m: float,
     width: int,
     height: int,
     kw: dict,
 ) -> list[dict]:
-    if end_s < 20 or speed_ms < 15:
+    """Fixed-length ground track so every aircraft gets the same heading tick."""
+    if speed_ms < 8:
         return []
-    times = np.linspace(0.0, end_s, 12)
+    end_s = HEADING_KM * 1000.0 / speed_ms
+    times = np.linspace(0.0, end_s, 6)
     n = times.size
     lat_t, lon_t, alt_t = offset_llh(
         np.full(n, lat),
@@ -369,11 +620,13 @@ def _predict_path(
         np.full(n, vrate),
         times,
     )
-    paz, pel, _rng = look_azel_geodetic(lat_t, lon_t, alt_t, obs_lat, obs_lon, obs_alt_m)
-    xs, ys, vis = altaz_to_xy(pel, paz, width, height, **kw)
+    map_az, horiz = enu_az_range(lat_t, lon_t, obs_lat, obs_lon)
+    xs, ys, vis = rangeaz_to_xy(horiz, map_az, width, height, **kw)
     path = []
     for i, ok in enumerate(vis):
-        if not ok or pel[i] < 0:
+        if not ok or horiz[i] > MAP_RANGE_KM * 1.02:
             continue
-        path.append(_norm(float(xs[i]), float(ys[i]), width, height))
+        pt = _norm(float(xs[i]), float(ys[i]), width, height)
+        pt["ground_km"] = round(float(horiz[i]), 1)
+        path.append(pt)
     return path

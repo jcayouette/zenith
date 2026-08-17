@@ -1,0 +1,59 @@
+# Operator CLI for the Pi.
+# Native systemd today. Later the same verbs wrap Compose (ZENITH_RUNTIME=compose).
+version: "3"
+
+vars:
+  CTL: "{{.ROOT_DIR}}/scripts/zenithctl"
+
+tasks:
+  default:
+    desc: List operator commands
+    cmds:
+      - task --list
+
+  start:
+    desc: Start the Zenith server
+    cmds:
+      - "{{.CTL}} start"
+
+  stop:
+    desc: Stop the Zenith server
+    cmds:
+      - "{{.CTL}} stop"
+
+  restart:
+    desc: Restart the Zenith server
+    cmds:
+      - "{{.CTL}} restart"
+
+  status:
+    desc: Show whether Zenith is running
+    cmds:
+      - "{{.CTL}} status"
+
+  logs:
+    desc: Follow server logs
+    cmds:
+      - "{{.CTL}} logs"
+
+  ui:
+    desc: Rebuild the frontend (no restart needed)
+    dir: frontend
+    cmds:
+      - npm run build
+
+  test:
+    desc: Run backend tests
+    dir: backend
+    cmds:
+      - .venv/bin/python3 -m unittest discover -s tests -v
+
+  install:
+    desc: Install the systemd user unit (starts at boot once linger is on)
+    cmds:
+      - "{{.CTL}} install"
+
+  uninstall:
+    desc: Disable and remove the systemd user unit
+    cmds:
+      - "{{.CTL}} uninstall"

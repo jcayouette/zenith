@@ -83,6 +83,26 @@ class LocationSettings(BaseModel):
         ge=-24,
         le=0,
     )
+    name: str = _f(
+        "Short label for the Sky map pin (e.g. Allsky, garden, roof).",
+        default="",
+        title="Site name",
+    )
+    address: str = _f(
+        "Street and house number. Shown on the Sky map pin with your city.",
+        default="",
+        title="Street address",
+    )
+    postcode: str = _f(
+        "Postal code for this site (e.g. 91052).",
+        default="",
+        title="Postcode",
+    )
+    city: str = _f(
+        "Town or city (e.g. Erlangen). Shown under the zenith when the Site layer is on.",
+        default="",
+        title="City",
+    )
 
     def resolved_timezone(self) -> str:
         if self.timezone_auto:
@@ -382,11 +402,34 @@ class SkySettings(BaseModel):
         default=True,
     )
     aircraft: bool = _f(
-        "Radar-style ADS-B overlay from OpenSky: aircraft now within 50 km, plus inbound "
-        "flights whose track will pass within 50 km. Green horizon dots mark where they "
-        "are coming from. Optional OPENSKY_USERNAME / OPENSKY_PASSWORD raise the rate limit.",
+        "Radar-style ADS-B overlay on the local 80 km ground map. Inbound flights that "
+        "will pass within 50 km show as green radar blips on the rim. "
+        "Uses OpenSky when credits remain, otherwise a community ADS-B feed.",
         default=True,
         title="Aircraft",
+    )
+    map: bool = _f(
+        "Sharp OpenStreetMap of the local 80 km around the site. Same north and overlay-radius as the sky disk.",
+        default=False,
+        title="Map",
+    )
+    site_label: bool = _f(
+        "Show the observatory name and town under the zenith on the Sky overlay.",
+        default=True,
+        title="Site label",
+    )
+    map_brightness: float = _f(
+        "How strong the ground map is drawn over the live frame. 0 is off, 1 is full tiles.",
+        default=0.62,
+        ge=0.1,
+        le=1.0,
+        title="Map brightness",
+    )
+    map_style: Literal["street", "satellite", "hybrid", "terrain", "elevation"] = _f(
+        "Basemap under the Sky overlay. Streets and hybrid keep place names; satellite and "
+        "terrain are imagery; elevation is OpenTopoMap contours.",
+        default="street",
+        title="Map style",
     )
     mag_limit: float = _f(
         "Faintest catalog stars drawn on the Sky overlay (and painted by the simulator). "

@@ -2,10 +2,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import AcInspector, { type AcMeta } from "@/components/AcInspector";
 import AcLayer, { type AcPt } from "@/components/AcLayer";
+import GroundMap, { type MapStyle } from "@/components/GroundMap";
 import LiveFrame from "@/components/LiveFrame";
 import SatInspector, { type Satcat } from "@/components/SatInspector";
 import SatLayer, { satKindOf, type SatLayerHandle } from "@/components/SatLayer";
 import SkyToolbar, { type PanelId, type SkyConfig } from "@/components/SkyToolbar";
+import type { OverlayView } from "@/lib/overlayView";
 import type { Telemetry } from "@/lib/utils";
 
 type Pt = {
@@ -62,7 +64,18 @@ type SkyPayload = {
   dt?: number;
 };
 
-type SettingsValues = { sky?: Partial<SkyConfig> };
+type SettingsValues = {
+  sky?: Partial<SkyConfig>;
+  location?: {
+    latitude?: number;
+    longitude?: number;
+    keogram_angle_deg?: number;
+    name?: string;
+    address?: string;
+    city?: string;
+    postcode?: string;
+  };
+};
 
 const SKY_DEFAULTS: SkyConfig = {
   constellations: true,
@@ -73,6 +86,10 @@ const SKY_DEFAULTS: SkyConfig = {
   planets: true,
   satellites: true,
   aircraft: true,
+  map: false,
+  site_label: true,
+  map_brightness: 0.62,
+  map_style: "street" as MapStyle,
   mag_limit: 5,
   star_name_mag: 1.85,
   min_sat_alt_deg: 0,
@@ -84,7 +101,7 @@ const SKY_DEFAULTS: SkyConfig = {
 
 const emptyTel = { mode: "—", sun_alt: 0, backend: "—", error: null as string | null, camera: true };
 const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 16;
+const MAX_ZOOM = 512;
 
 export default function Sky() {
   const client = useQueryClient();
@@ -262,7 +279,7 @@ export default function Sky() {
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const rect = stage.getBoundingClientRect();
-      zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.12 : 1 / 1.12);
+      zoomAt(e.clientX - rect.left, e.clientY - rect.top, wheelFactor(zoomRef.current, e.deltaY < 0));
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     return () => stage.removeEventListener("wheel", onWheel);
@@ -303,6 +320,11 @@ export default function Sky() {
     setPan({ x: 0, y: 0 });
   }
 
+  function centerView() {
+    panRef.current = { x: 0, y: 0 };
+    setPan({ x: 0, y: 0 });
+  }
+
   function shiftPan(dx: number, dy: number) {
     const next = { x: panRef.current.x + dx, y: panRef.current.y + dy };
     panRef.current = next;
@@ -333,6 +355,7 @@ export default function Sky() {
       if (e.key === "+" || e.key === "=") zoomBy(1.15);
       if (e.key === "-" || e.key === "_") zoomBy(1 / 1.15);
       if (e.key === "0") resetView();
+      if (e.key === "c" || e.key === "C") centerView();
       if (e.key === "f" || e.key === "F") void toggleFullscreen();
       if (e.key === "Escape") {
         setPanel(null);
@@ -409,6 +432,13 @@ export default function Sky() {
   const lineWidth = cfg.constellation_line_px;
   const bake = sky?.projected_horizon ?? sky?.horizon ?? 1;
   const fit = bake > 0 ? cfg.horizon / bake : 1;
+  const loc = settingsQuery.data?.location;
+  const hasSite = Boolean(loc) && !(loc?.latitude === 0 && loc?.longitude === 0);
+  const siteLat = hasSite ? loc?.latitude ?? null : null;
+  const siteLon = hasSite ? loc?.longitude ?? null : null;
+  const northAngle = loc?.keogram_angle_deg ?? 0;
+  const siteName = loc?.name?.trim() || "";
+  const siteCity = loc?.city?.trim() || "";
   const overlayStars = useMemo(
     () => (sky?.stars ?? []).filter((s) => (s.mag ?? 99) <= cfg.mag_limit),
     [sky, cfg.mag_limit],
@@ -498,7 +528,9 @@ export default function Sky() {
     let stop = false;
     setAcMetaLoading(true);
     setAcMeta(null);
-    void fetch(`/api/sky/aircraft/${encodeURIComponent(icao)}`)
+    const callsign = pickedAc?.name?.trim();
+    const qs = callsign ? `?callsign=${encodeURIComponent(callsign)}` : "";
+    void fetch(`/api/sky/aircraft/${encodeURIComponent(icao)}${qs}`)
       .then((res) => (res.ok ? res.json() : { icao24: icao, error: "No aircraft type record" }))
       .then((data: AcMeta) => {
         if (!stop) setAcMeta(data);
@@ -512,7 +544,7 @@ export default function Sky() {
     return () => {
       stop = true;
     };
-  }, [selectedAc, pickedAc?.icao24, pickedAc?.id]);
+  }, [selectedAc, pickedAc?.icao24, pickedAc?.id, pickedAc?.name]);
 
   const status = [
     tel.backend,
@@ -528,6 +560,13 @@ export default function Sky() {
   const scaledH = worldH * zoom;
   const worldLeft = (stageSize.w - scaledW) / 2 + pan.x;
   const worldTop = (stageSize.h - scaledH) / 2 + pan.y;
+  const overlayView: OverlayView = {
+    left: worldLeft,
+    top: worldTop,
+    width: scaledW,
+    height: scaledH,
+    fit,
+  };
 
   function onGrabPointerDown(e: ReactPointerEvent) {
     if (e.button !== 0) return;
@@ -562,8 +601,10 @@ export default function Sky() {
         style={{
           left: worldLeft,
           top: worldTop,
-          width: scaledW || "100%",
-          height: scaledH || "100%",
+          width: worldW || "100%",
+          height: worldH || "100%",
+          transform: `scale(${zoom})`,
+          transformOrigin: "0 0",
         }}
       >
         {image ? (
@@ -575,6 +616,31 @@ export default function Sky() {
         ) : (
           <div className="flex h-full w-full items-center justify-center text-white/40">Waiting for live frame…</div>
         )}
+      </div>
+      {cfg.map && siteLat != null && siteLon != null && sky ? (
+        <div className="pointer-events-none absolute inset-0 z-[1]">
+          <GroundMap
+            view={overlayView}
+            brightness={cfg.map_brightness}
+            lat={siteLat}
+            lon={siteLon}
+            northAngle={northAngle}
+            mapKm={80}
+            basemap={(cfg.map_style as MapStyle) || "street"}
+          />
+        </div>
+      ) : null}
+      <div
+        className="pointer-events-none absolute z-[2]"
+        style={{
+          left: worldLeft,
+          top: worldTop,
+          width: worldW || "100%",
+          height: worldH || "100%",
+          transform: `scale(${zoom})`,
+          transformOrigin: "0 0",
+        }}
+      >
         {sky ? (
           <svg
             className="pointer-events-none absolute inset-0 h-full w-full"
@@ -605,6 +671,47 @@ export default function Sky() {
                   ) : null,
                 )
               : null}
+            {cfg.site_label && (siteName || siteCity) ? (
+              <g opacity="0.9" style={{ fontFamily: "inherit" }}>
+                <line
+                  x1={0.5}
+                  y1={0.512}
+                  x2={0.5}
+                  y2={0.521}
+                  stroke="rgba(200,231,255,0.4)"
+                  strokeWidth="1"
+                  vectorEffect="non-scaling-stroke"
+                />
+                {siteName ? (
+                  <text
+                    x={0.5}
+                    y={0.524}
+                    fill="rgba(226,239,255,0.82)"
+                    fontSize="0.0088"
+                    fontWeight={500}
+                    textAnchor="middle"
+                    dominantBaseline="hanging"
+                    style={{ letterSpacing: "0.16em" }}
+                  >
+                    {siteName}
+                  </text>
+                ) : null}
+                {siteCity ? (
+                  <text
+                    x={0.5}
+                    y={siteName ? 0.535 : 0.524}
+                    fill="rgba(200,231,255,0.5)"
+                    fontSize="0.0066"
+                    fontWeight={400}
+                    textAnchor="middle"
+                    dominantBaseline="hanging"
+                    style={{ letterSpacing: "0.28em" }}
+                  >
+                    {siteCity.toUpperCase()}
+                  </text>
+                ) : null}
+              </g>
+            ) : null}
             {cfg.grid
               ? sky.grid.map((g, i) => {
                   const label = gridDegreeLabel(g);
@@ -719,49 +826,50 @@ export default function Sky() {
             </g>
           </svg>
         ) : null}
-        {sky && (cfg.satellites || cfg.aircraft) ? (
-          <>
-            {cfg.satellites ? (
-              <SatLayer
-                ref={satLayerRef}
-                samples={sats}
-                dt={satDt}
-                fit={fit}
-                iconScale={cfg.sat_icon_scale}
-                kinds={satKinds}
-                selectedId={selectedSat}
-                onSelect={(id) => {
-                  setSelectedSat(id);
-                  if (id) setSelectedAc(null);
-                }}
-                onPan={shiftPan}
-                viewZoom={zoom}
-                interactive={!cfg.aircraft}
-              />
-            ) : null}
-            {cfg.aircraft ? (
-              <AcLayer
-                samples={planes}
-                dt={acDt}
-                fit={fit}
-                iconScale={cfg.sat_icon_scale}
-                selectedId={selectedAc}
-                onSelect={(id) => {
-                  setSelectedAc(id);
-                  if (id) setSelectedSat(null);
-                }}
-                onMiss={(x, y) => {
-                  if (cfg.satellites) satLayerRef.current?.hitAt(x, y);
-                }}
-                onPan={shiftPan}
-                viewZoom={zoom}
-              />
-            ) : null}
-          </>
-        ) : (
-          <div className="absolute inset-0 cursor-grab touch-none active:cursor-grabbing" onPointerDown={onGrabPointerDown} />
-        )}
       </div>
+      {sky && (cfg.satellites || cfg.aircraft) ? (
+        <div className="absolute inset-0 z-[3]">
+          {cfg.satellites ? (
+            <SatLayer
+              ref={satLayerRef}
+              samples={sats}
+              dt={satDt}
+              iconScale={cfg.sat_icon_scale}
+              kinds={satKinds}
+              selectedId={selectedSat}
+              onSelect={(id) => {
+                setSelectedSat(id);
+                if (id) setSelectedAc(null);
+              }}
+              onPan={shiftPan}
+              view={overlayView}
+              interactive={!cfg.aircraft}
+            />
+          ) : null}
+          {cfg.aircraft ? (
+            <AcLayer
+              samples={planes}
+              dt={acDt}
+              iconScale={cfg.sat_icon_scale}
+              selectedId={selectedAc}
+              onSelect={(id) => {
+                setSelectedAc(id);
+                if (id) setSelectedSat(null);
+              }}
+              onMiss={(x, y) => {
+                if (cfg.satellites) satLayerRef.current?.hitAt(x, y);
+              }}
+              onPan={shiftPan}
+              view={overlayView}
+            />
+          ) : null}
+        </div>
+      ) : (
+        <div
+          className="absolute inset-0 z-[3] cursor-grab touch-none active:cursor-grabbing"
+          onPointerDown={onGrabPointerDown}
+        />
+      )}
       <SkyToolbar
         cfg={cfg}
         panel={panel}
@@ -784,9 +892,10 @@ export default function Sky() {
         onSelectSat={setSelectedSat}
         onPatch={patchSky}
         onCommitSlider={commitSlider}
-        onZoomIn={() => zoomBy(1.2)}
-        onZoomOut={() => zoomBy(1 / 1.2)}
-        onResetView={resetView}
+        onZoomIn={() => zoomBy(wheelFactor(zoomRef.current, true))}
+        onZoomOut={() => zoomBy(wheelFactor(zoomRef.current, false))}
+        onCenterView={centerView}
+        onFitView={resetView}
         onFullscreen={() => void toggleFullscreen()}
       />
       {pickedAc ? (
@@ -839,6 +948,11 @@ function splitByMag(line: Pt[], magLimit: number): Pt[][] {
   }
   if (run.length >= 2) runs.push(run);
   return runs;
+}
+
+function wheelFactor(zoom: number, inward: boolean) {
+  const step = zoom >= 48 ? 1.4 : zoom >= 8 ? 1.25 : 1.12;
+  return inward ? step : 1 / step;
 }
 
 function starRadius(mag: number) {

@@ -122,11 +122,11 @@ export function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-export function Row({ label, value }: { label: string; value: string }) {
+export function Row({ label, value, wrap }: { label: string; value: string; wrap?: boolean }) {
   return (
     <div className="flex justify-between gap-3">
-      <dt className="text-white/40">{label}</dt>
-      <dd className="truncate text-right tabular-nums text-white/85">{value}</dd>
+      <dt className="shrink-0 text-white/40">{label}</dt>
+      <dd className={`text-right text-white/85 ${wrap ? "leading-snug" : "truncate tabular-nums"}`}>{value}</dd>
     </div>
   );
 }

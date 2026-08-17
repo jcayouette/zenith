@@ -55,6 +55,39 @@ class ProjectTests(unittest.TestCase):
         self.assertAlmostEqual(x, 400.0, delta=2)
         self.assertAlmostEqual(y, 150.0, delta=2)
 
+    def test_xy_to_altaz_roundtrip(self):
+        from zenith.sky.project import xy_to_altaz
+
+        for alt, az in ((90.0, 0.0), (45.0, 30.0), (12.0, 270.0), (8.0, 180.0)):
+            x, y, vis = altaz_to_xy(alt, az, 200, 200, north_angle_deg=15)
+            self.assertTrue(vis)
+            a2, z2, ok = xy_to_altaz(x, y, 200, 200, north_angle_deg=15)
+            self.assertTrue(ok)
+            self.assertAlmostEqual(a2, alt, delta=0.4)
+            if alt < 89:
+                daz = abs((z2 - az + 180) % 360 - 180)
+                self.assertLess(daz, 0.5)
+
+    def test_rangeaz_roundtrip_and_north_is_up(self):
+        from zenith.sky.project import rangeaz_to_xy, xy_to_rangeaz
+
+        x, y, vis = rangeaz_to_xy(0.0, 0.0, 200, 200, max_range_km=420)
+        self.assertTrue(vis)
+        self.assertAlmostEqual(x, 100.0, delta=0.6)
+        self.assertAlmostEqual(y, 100.0, delta=0.6)
+        x, y, vis = rangeaz_to_xy(420.0, 0.0, 200, 200, max_range_km=420)
+        self.assertTrue(vis)
+        self.assertAlmostEqual(x, 100.0, delta=2)
+        self.assertLess(y, 20)
+        x, y, vis = rangeaz_to_xy(50.0, 0.0, 200, 200, max_range_km=420)
+        self.assertTrue(vis)
+        self.assertAlmostEqual(x, 100.0, delta=2)
+        self.assertAlmostEqual(y, 100.0 - (50.0 / 420.0) * 100.0, delta=2)
+        r2, az2, ok = xy_to_rangeaz(x, y, 200, 200, max_range_km=420)
+        self.assertTrue(ok)
+        self.assertAlmostEqual(r2, 50.0, delta=0.8)
+        self.assertLess(min(az2, 360 - az2), 1.0)
+
     def test_orient_xy_matches_numpy(self):
         h, w = 5, 8
         y0, x0 = 1, 6
@@ -240,6 +273,19 @@ class AircraftTests(unittest.TestCase):
         cpa, _tca, _horiz = closest_approach(lat, 10.8772, 90, 250, 49.6314, 10.8772)
         self.assertGreater(cpa, 90)
 
+    def test_look_inverse_matches_forward(self):
+        from zenith.sky.aircraft import llh_along_look, look_azel_geodetic
+
+        obs_lat, obs_lon, obs_h = 49.6314, 10.8772, 296.0
+        tgt_lat = obs_lat + 50 / 111.32
+        tgt_lon = obs_lon
+        tgt_h = 11000.0
+        az, el, _rng = look_azel_geodetic(tgt_lat, tgt_lon, tgt_h, obs_lat, obs_lon, obs_h)
+        lat2, lon2, h2 = llh_along_look(az, el, tgt_h, obs_lat, obs_lon, obs_h)
+        self.assertAlmostEqual(lat2, tgt_lat, delta=0.02)
+        self.assertAlmostEqual(lon2, tgt_lon, delta=0.02)
+        self.assertAlmostEqual(h2, tgt_h, delta=80)
+
     def test_project_skips_grounded(self):
         from zenith.sky.aircraft import _project
 
@@ -291,19 +337,20 @@ class AircraftTests(unittest.TestCase):
         self.assertEqual(planes[0]["name"], "DLH123")
         self.assertGreater(planes[0]["alt"], 80)
 
-    def test_project_keeps_inbound_and_drops_parallel(self):
+    def test_project_keeps_local_and_drops_far(self):
         from zenith.sky.aircraft import _project
 
         now = datetime(2026, 8, 16, 18, 0, tzinfo=timezone.utc).timestamp()
-        lat_n = 49.6314 + 80 / 111.32
-        inbound = [
+        lat_local = 49.6314 + 40 / 111.32
+        lat_far = 49.6314 + 200 / 111.32
+        local = [
             "inb001",
             "INB01",
             "Germany",
             now,
             now,
             10.8772,
-            lat_n,
+            lat_local,
             11000,
             False,
             250,
@@ -316,12 +363,12 @@ class AircraftTests(unittest.TestCase):
             0,
             3,
         ]
-        parallel = list(inbound)
-        parallel[0] = "par001"
-        parallel[1] = "PAR01"
-        parallel[10] = 90
+        far = list(local)
+        far[0] = "far001"
+        far[1] = "FAR01"
+        far[6] = lat_far
         planes = _project(
-            [inbound, parallel],
+            [local, far],
             49.6314,
             10.8772,
             296,
@@ -336,11 +383,84 @@ class AircraftTests(unittest.TestCase):
         )
         names = {p["name"] for p in planes}
         self.assertIn("INB01", names)
-        self.assertNotIn("PAR01", names)
+        self.assertIn("FAR01", names)
         row = next(p for p in planes if p["name"] == "INB01")
         self.assertTrue(row["inbound"])
+        self.assertFalse(row.get("rim"))
         self.assertIn("from_x", row)
+        self.assertAlmostEqual(row["from_x"], 0.5, delta=0.04)
+        self.assertLess(row["from_y"], 0.08)
+        self.assertAlmostEqual(row["x"], 0.5, delta=0.04)
+        self.assertAlmostEqual(row["y"], 0.25, delta=0.06)
+        self.assertAlmostEqual(row["ground_km"], 40, delta=3)
         self.assertGreater(len(row.get("path") or []), 2)
+        self.assertLess(len(row.get("path") or []), 8)
+        self.assertTrue(any((pt.get("ground_km") or 0) > 0 for pt in row["path"]))
+        far = next(p for p in planes if p["name"] == "FAR01")
+        self.assertTrue(far["inbound"])
+        self.assertTrue(far.get("rim"))
+        self.assertIn("from_x", far)
+        self.assertAlmostEqual(far["from_x"], 0.5, delta=0.04)
+        self.assertLess(far["from_y"], 0.08)
+        self.assertEqual(far.get("path") or [], [])
+
+    def test_enu_range_inverts_on_the_map_plane(self):
+        from zenith.sky.aircraft import enu_az_range, llh_at_range_az
+
+        obs_lat, obs_lon = 49.6314, 10.8772
+        lat, lon = llh_at_range_az(0.0, 50.0, obs_lat, obs_lon)
+        az, rng = enu_az_range(lat, lon, obs_lat, obs_lon)
+        self.assertAlmostEqual(rng, 50.0, delta=0.05)
+        self.assertLess(min(az, 360 - az), 0.5)
+
+    def test_parse_adsb_lol_row(self):
+        from zenith.sky.aircraft import parse_adsb_ac
+
+        now = 1_700_000_000.0
+        rows = parse_adsb_ac(
+            {
+                "now": now,
+                "ac": [
+                    {
+                        "hex": "406d7b",
+                        "flight": "BAW130  ",
+                        "lat": 49.588531,
+                        "lon": 7.944199,
+                        "alt_baro": 40000,
+                        "alt_geom": 41225,
+                        "gs": 454.4,
+                        "track": 302.78,
+                        "baro_rate": -96,
+                        "squawk": "7541",
+                        "category": "A5",
+                    },
+                    {"hex": "gnd001", "lat": 49.63, "lon": 10.88, "alt_baro": "ground"},
+                ],
+            },
+            now,
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], "406d7b")
+        self.assertEqual(rows[0][1], "BAW130")
+        self.assertGreater(rows[0][7], 12000)
+        self.assertFalse(rows[0][8])
+
+
+class PlacesTests(unittest.TestCase):
+    def test_dedupe_prefers_city(self):
+        from zenith.sky.places import _dedupe
+
+        rows = _dedupe(
+            [
+                {"name": "Erlangen", "kind": "village", "km": 2},
+                {"name": "Erlangen", "kind": "city", "km": 14},
+                {"name": "Bamberg", "kind": "town", "km": 40},
+            ]
+        )
+        names = [r["name"] for r in rows]
+        self.assertEqual(names[0], "Erlangen")
+        self.assertEqual(rows[0]["kind"], "city")
+        self.assertIn("Bamberg", names)
 
 
 class AcmetaTests(unittest.TestCase):
@@ -386,6 +506,50 @@ class AcmetaTests(unittest.TestCase):
         )
         self.assertEqual(row["typecode"], "B38M")
         self.assertEqual(row["model"], "737MAX 8 200")
+
+    def test_parse_adsbdb_route(self):
+        from zenith.sky.acmeta import parse_adsbdb_route
+
+        row = parse_adsbdb_route(
+            {
+                "response": {
+                    "flightroute": {
+                        "airline": {"name": "British Airways"},
+                        "origin": {
+                            "iata_code": "LHR",
+                            "icao_code": "EGLL",
+                            "municipality": "London",
+                            "name": "London Heathrow Airport",
+                        },
+                        "destination": {
+                            "iata_code": "FRA",
+                            "icao_code": "EDDF",
+                            "municipality": "Frankfurt am Main",
+                            "name": "Frankfurt Airport",
+                        },
+                    }
+                }
+            },
+            "BAW123",
+        )
+        self.assertEqual(row["route"], "LHR → FRA")
+        self.assertEqual(row["origin"]["code"], "LHR")
+        self.assertIn("London", row["origin"]["label"])
+        self.assertEqual(row["destination"]["code"], "FRA")
+        self.assertEqual(row["airline"], "British Airways")
+
+    def test_parse_hexdb_route(self):
+        from zenith.sky.acmeta import parse_hexdb_route
+
+        row = parse_hexdb_route({"origin": "EGLL", "destination": "EDDF"}, "BAW123")
+        self.assertEqual(row["route"], "EGLL → EDDF")
+        self.assertEqual(row["origin"]["label"], "EGLL")
+
+    def test_rejects_hex_as_callsign(self):
+        from zenith.sky.acmeta import lookup_route
+
+        self.assertIsNone(lookup_route("4cad54"))
+        self.assertIsNone(lookup_route(""))
 
 
 if __name__ == "__main__":

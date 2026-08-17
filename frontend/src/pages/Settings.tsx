@@ -19,7 +19,7 @@ type JsonSchema = {
 type Values = Record<string, unknown>;
 
 const GROUP_COPY: Record<string, string> = {
-    location: "Site position. Day/night follows the sun here; the clock only needs to be NTP-synced.",
+    location: "Coordinates, address, and city. The Sky map is centred here and labels nearby towns.",
   camera: "Sensor, archive, and capture pipeline.",
   picamera2: "Raspberry Pi HQ / IMX477 ISP.",
   indi: "USB astro cameras via indiserver.",
@@ -27,7 +27,7 @@ const GROUP_COPY: Record<string, string> = {
   day: "Exposure while the sun is up.",
   night: "Exposure after night begins.",
   overlay: "Text on the live JPEG and thumbs. Raw stays clean.",
-  sky: "Constellations, named stars, satellites, and an ADS-B radar overlay (inbound within 50 km) on the Sky page.",
+  sky: "Constellations, named stars, satellites, ADS-B, and a dimmed site map on the Sky page.",
   products: "Keograms, startrails, and timelapses.",
 };
 

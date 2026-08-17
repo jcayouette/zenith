@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { MAP_STYLE_OPTIONS, type MapStyle } from "@/components/GroundMap";
 import { SAT_KIND, SatIcon } from "@/components/SatLayer";
 
 export type LayerKey =
@@ -9,7 +10,9 @@ export type LayerKey =
   | "grid"
   | "planets"
   | "satellites"
-  | "aircraft";
+  | "aircraft"
+  | "map"
+  | "site_label";
 
 export type SkyConfig = {
   constellations: boolean;
@@ -20,6 +23,10 @@ export type SkyConfig = {
   planets: boolean;
   satellites: boolean;
   aircraft: boolean;
+  map: boolean;
+  site_label: boolean;
+  map_brightness: number;
+  map_style: "street" | "satellite" | "hybrid" | "terrain" | "elevation";
   mag_limit: number;
   star_name_mag: number;
   min_sat_alt_deg: number;
@@ -56,6 +63,8 @@ const LAYER_LABEL: Record<LayerKey, string> = {
   planets: "Sun & moon",
   satellites: "Satellites",
   aircraft: "Aircraft",
+  map: "Map",
+  site_label: "Site",
 };
 
 type Props = {
@@ -82,7 +91,8 @@ type Props = {
   onCommitSlider: () => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
-  onResetView: () => void;
+  onCenterView: () => void;
+  onFitView: () => void;
   onFullscreen: () => void;
 };
 
@@ -111,7 +121,8 @@ export default function SkyToolbar(props: Props) {
     onCommitSlider,
     onZoomIn,
     onZoomOut,
-    onResetView,
+    onCenterView,
+    onFitView,
     onFullscreen,
   } = props;
 
@@ -236,6 +247,37 @@ export default function SkyToolbar(props: Props) {
                 onChange={(v) => onPatch({ horizon: v })}
                 onCommit={onCommitSlider}
               />
+              {cfg.map ? (
+                <>
+                  <label className="block">
+                    <span className="flex items-center justify-between text-sm text-white/80">
+                      Map style
+                    </span>
+                    <select
+                      className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm text-white"
+                      value={cfg.map_style}
+                      onChange={(e) => onPatch({ map_style: e.target.value as MapStyle })}
+                    >
+                      {MAP_STYLE_OPTIONS.map((opt) => (
+                        <option key={opt.id} value={opt.id}>
+                          {opt.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <Slider
+                    label="Map brightness"
+                    hint="How strong the map is over the live frame."
+                    value={cfg.map_brightness}
+                    min={0.1}
+                    max={1}
+                    step={0.02}
+                    format={(v) => `${Math.round(v * 100)}%`}
+                    onChange={(v) => onPatch({ map_brightness: v })}
+                    onCommit={onCommitSlider}
+                  />
+                </>
+              ) : null}
               <Slider
                 label="Line thickness"
                 value={cfg.constellation_line_px}
@@ -350,15 +392,31 @@ export default function SkyToolbar(props: Props) {
           </IconBtn>
           <button
             type="button"
-            onClick={onResetView}
+            onClick={onFitView}
             className="min-w-[3.25rem] rounded-xl px-2 py-1.5 text-xs tabular-nums text-white/80 hover:bg-white/10"
-            title="Reset view"
+            title="Fit the full sky disk"
           >
-            {Math.round(zoom * 100)}%
+            {zoom >= 10 ? `${Math.round(zoom)}×` : `${Math.round(zoom * 100)}%`}
           </button>
           <IconBtn label="Zoom in" onClick={onZoomIn}>
             +
           </IconBtn>
+          <button
+            type="button"
+            onClick={onCenterView}
+            className="rounded-xl px-2 py-1.5 text-xs text-white/80 hover:bg-white/10"
+            title="Center on the site"
+          >
+            Center
+          </button>
+          <button
+            type="button"
+            onClick={onFitView}
+            className="rounded-xl px-2 py-1.5 text-xs text-white/80 hover:bg-white/10"
+            title="Fit the full sky disk"
+          >
+            Fit
+          </button>
           <IconBtn label={fullscreen ? "Exit fullscreen" : "Fullscreen"} onClick={onFullscreen}>
             {fullscreen ? "✕" : "⛶"}
           </IconBtn>
