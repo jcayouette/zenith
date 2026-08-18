@@ -7,7 +7,7 @@ import LiveFrame from "@/components/LiveFrame";
 import SatInspector, { type Satcat } from "@/components/SatInspector";
 import SatLayer, { satKindOf, type SatLayerHandle } from "@/components/SatLayer";
 import SkyToolbar, { type PanelId, type SkyConfig } from "@/components/SkyToolbar";
-import type { OverlayView } from "@/lib/overlayView";
+import { EMPTY_VIEW, type OverlayView } from "@/lib/overlayView";
 import type { Telemetry } from "@/lib/utils";
 
 type Pt = {
@@ -101,7 +101,7 @@ const SKY_DEFAULTS: SkyConfig = {
 
 const emptyTel = { mode: "—", sun_alt: 0, backend: "—", error: null as string | null, camera: true };
 const MIN_ZOOM = 0.5;
-const MAX_ZOOM = 512;
+const MAX_ZOOM = 256;
 
 export default function Sky() {
   const client = useQueryClient();
@@ -129,6 +129,10 @@ export default function Sky() {
   const [draftRev, setDraftRev] = useState(0);
   const [satKinds, setSatKinds] = useState<string[] | null>(null);
   const [panel, setPanel] = useState<PanelId | null>(null);
+  const [trackGps, setTrackGps] = useState(true);
+  const [trackSsr, setTrackSsr] = useState(false);
+  const [trackPsr, setTrackPsr] = useState(false);
+  const [flightMode, setFlightMode] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -137,11 +141,23 @@ export default function Sky() {
   const stageRef = useRef<HTMLDivElement>(null);
   const zoomRef = useRef(1);
   const panRef = useRef({ x: 0, y: 0 });
+  const panRafRef = useRef<number | null>(null);
+  const zoomRafRef = useRef<number | null>(null);
   const boxRef = useRef({ w: 0, h: 0 });
+  const stageSizeRef = useRef({ w: 0, h: 0 });
+  const fitRef = useRef(1);
+  const overlayViewRef = useRef<OverlayView>(EMPTY_VIEW);
+  const worldRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
   const cssFullRef = useRef(false);
-  zoomRef.current = zoom;
-  panRef.current = pan;
+  const livePanRef = useRef(false);
+  const liveZoomRef = useRef(false);
+  const zoomIdleRef = useRef(0);
+  if (liveZoomRef.current && zoom === zoomRef.current) liveZoomRef.current = false;
+  if (!liveZoomRef.current && zoomRafRef.current == null) zoomRef.current = zoom;
+  if (!livePanRef.current && panRafRef.current == null) panRef.current = pan;
   boxRef.current = box;
+  stageSizeRef.current = stageSize;
 
   const settingsQuery = useQuery({
     queryKey: ["settings"],
@@ -278,12 +294,44 @@ export default function Sky() {
     if (!stage) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const rect = stage.getBoundingClientRect();
-      zoomAt(e.clientX - rect.left, e.clientY - rect.top, wheelFactor(zoomRef.current, e.deltaY < 0));
+      zoomBy(wheelFactor(zoomRef.current, e.deltaY < 0));
     };
     stage.addEventListener("wheel", onWheel, { passive: false });
     return () => stage.removeEventListener("wheel", onWheel);
   }, []);
+
+  function makeView(z: number, p: { x: number; y: number }): OverlayView {
+    const { w, h } = boxRef.current;
+    const sw = stageSizeRef.current.w;
+    const sh = stageSizeRef.current.h;
+    const width = w * z;
+    const height = h * z;
+    return {
+      left: (sw - width) / 2 + p.x,
+      top: (sh - height) / 2 + p.y,
+      width,
+      height,
+      fit: fitRef.current,
+    };
+  }
+
+  function applyTransforms(z: number, p: { x: number; y: number }) {
+    const v = makeView(z, p);
+    overlayViewRef.current = v;
+    const t = `translate(${v.left}px, ${v.top}px) scale(${z})`;
+    if (worldRef.current) worldRef.current.style.transform = t;
+    if (gridRef.current) gridRef.current.style.transform = t;
+  }
+
+  function scheduleZoomCommit() {
+    liveZoomRef.current = true;
+    window.clearTimeout(zoomIdleRef.current);
+    zoomIdleRef.current = window.setTimeout(() => {
+      zoomIdleRef.current = 0;
+      setZoom(zoomRef.current);
+      setPan(panRef.current);
+    }, 180);
+  }
 
   function zoomAt(cx: number, cy: number, factor: number) {
     const stage = stageRef.current;
@@ -303,32 +351,60 @@ export default function Sky() {
     const ny = cy - (sh - h * next) / 2 - wy * next;
     zoomRef.current = next;
     panRef.current = { x: nx, y: ny };
-    setZoom(next);
-    setPan({ x: nx, y: ny });
+    applyTransforms(next, panRef.current);
+    scheduleZoomCommit();
   }
 
   function zoomBy(factor: number) {
     const stage = stageRef.current;
     if (!stage) return;
-    zoomAt(stage.clientWidth / 2, stage.clientHeight / 2, factor);
+    const { w, h } = boxRef.current;
+    const z = zoomRef.current;
+    const p = panRef.current;
+    const siteX = (stage.clientWidth - w * z) / 2 + p.x + (w * z) / 2;
+    const siteY = (stage.clientHeight - h * z) / 2 + p.y + (h * z) / 2;
+    zoomAt(siteX, siteY, factor);
   }
 
   function resetView() {
+    livePanRef.current = false;
+    liveZoomRef.current = false;
+    window.clearTimeout(zoomIdleRef.current);
+    zoomIdleRef.current = 0;
+    if (panRafRef.current != null) window.cancelAnimationFrame(panRafRef.current);
+    if (zoomRafRef.current != null) window.cancelAnimationFrame(zoomRafRef.current);
+    panRafRef.current = null;
+    zoomRafRef.current = null;
     zoomRef.current = 1;
     panRef.current = { x: 0, y: 0 };
+    applyTransforms(1, panRef.current);
     setZoom(1);
     setPan({ x: 0, y: 0 });
   }
 
   function centerView() {
+    livePanRef.current = false;
+    liveZoomRef.current = false;
+    window.clearTimeout(zoomIdleRef.current);
+    zoomIdleRef.current = 0;
+    if (panRafRef.current != null) window.cancelAnimationFrame(panRafRef.current);
+    panRafRef.current = null;
     panRef.current = { x: 0, y: 0 };
+    applyTransforms(zoomRef.current, panRef.current);
     setPan({ x: 0, y: 0 });
   }
 
   function shiftPan(dx: number, dy: number) {
-    const next = { x: panRef.current.x + dx, y: panRef.current.y + dy };
-    panRef.current = next;
-    setPan(next);
+    livePanRef.current = true;
+    panRef.current = { x: panRef.current.x + dx, y: panRef.current.y + dy };
+    applyTransforms(zoomRef.current, panRef.current);
+  }
+
+  function endPan() {
+    livePanRef.current = false;
+    if (panRafRef.current != null) window.cancelAnimationFrame(panRafRef.current);
+    panRafRef.current = null;
+    setPan(panRef.current);
   }
 
   async function toggleFullscreen() {
@@ -432,20 +508,21 @@ export default function Sky() {
   const lineWidth = cfg.constellation_line_px;
   const bake = sky?.projected_horizon ?? sky?.horizon ?? 1;
   const fit = bake > 0 ? cfg.horizon / bake : 1;
+  fitRef.current = fit;
   const loc = settingsQuery.data?.location;
   const hasSite = Boolean(loc) && !(loc?.latitude === 0 && loc?.longitude === 0);
-  const siteLat = hasSite ? loc?.latitude ?? null : null;
-  const siteLon = hasSite ? loc?.longitude ?? null : null;
+  const siteLat = hasSite ? (loc?.latitude ?? null) : null;
+  const siteLon = hasSite ? (loc?.longitude ?? null) : null;
   const northAngle = loc?.keogram_angle_deg ?? 0;
   const siteName = loc?.name?.trim() || "";
   const siteCity = loc?.city?.trim() || "";
   const overlayStars = useMemo(
-    () => (sky?.stars ?? []).filter((s) => (s.mag ?? 99) <= cfg.mag_limit),
-    [sky, cfg.mag_limit],
+    () => (cfg.star_names ? (sky?.stars ?? []).filter((s) => magVisible(s.mag, cfg.mag_limit)) : []),
+    [sky, cfg.star_names, cfg.mag_limit],
   );
   const namedStars = useMemo(
-    () => (sky?.star_names ?? []).filter((s) => (s.mag ?? 99) <= cfg.star_name_mag),
-    [sky, cfg.star_name_mag],
+    () => (cfg.star_names ? (sky?.star_names ?? []).filter((s) => magVisible(s.mag, cfg.star_name_mag)) : []),
+    [sky, cfg.star_names, cfg.star_name_mag],
   );
   const visibleConstellations = useMemo(
     () => filterFigures(sky?.constellations ?? [], cfg.mag_limit),
@@ -556,10 +633,12 @@ export default function Sky() {
 
   const worldW = box.w || stageSize.w;
   const worldH = box.h || stageSize.h;
-  const scaledW = worldW * zoom;
-  const scaledH = worldH * zoom;
-  const worldLeft = (stageSize.w - scaledW) / 2 + pan.x;
-  const worldTop = (stageSize.h - scaledH) / 2 + pan.y;
+  const zNow = zoomRef.current;
+  const pNow = panRef.current;
+  const scaledW = worldW * zNow;
+  const scaledH = worldH * zNow;
+  const worldLeft = (stageSize.w - scaledW) / 2 + pNow.x;
+  const worldTop = (stageSize.h - scaledH) / 2 + pNow.y;
   const overlayView: OverlayView = {
     left: worldLeft,
     top: worldTop,
@@ -567,6 +646,20 @@ export default function Sky() {
     height: scaledH,
     fit,
   };
+  overlayViewRef.current = overlayView;
+  const hudFont = 12 / Math.max(scaledW * fit, 1);
+  const hudFontLg = 14 / Math.max(scaledW * fit, 1);
+  const pinR = 4.5 / Math.max(scaledW * fit, 1);
+  const pinLen = 9 / Math.max(scaledW * fit, 1);
+  const worldStyle = {
+    left: 0,
+    top: 0,
+    width: worldW || "100%",
+    height: worldH || "100%",
+    transform: `translate(${worldLeft}px, ${worldTop}px) scale(${zNow})`,
+    transformOrigin: "0 0",
+    willChange: "transform",
+  } as const;
 
   function onGrabPointerDown(e: ReactPointerEvent) {
     if (e.button !== 0) return;
@@ -582,6 +675,7 @@ export default function Sky() {
       el.releasePointerCapture(e.pointerId);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      endPan();
     }
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -596,17 +690,7 @@ export default function Sky() {
           : "aspect-4/3 w-full rounded-3xl frame-glow"
       }`}
     >
-      <div
-        className="absolute"
-        style={{
-          left: worldLeft,
-          top: worldTop,
-          width: worldW || "100%",
-          height: worldH || "100%",
-          transform: `scale(${zoom})`,
-          transformOrigin: "0 0",
-        }}
-      >
+      <div ref={worldRef} className="absolute z-0" style={worldStyle}>
         {image ? (
           <LiveFrame
             src={image}
@@ -617,10 +701,13 @@ export default function Sky() {
           <div className="flex h-full w-full items-center justify-center text-white/40">Waiting for live frame…</div>
         )}
       </div>
-      {cfg.map && siteLat != null && siteLon != null && sky ? (
-        <div className="pointer-events-none absolute inset-0 z-[1]">
+      {cfg.map && siteLat != null && siteLon != null && stageSize.w > 8 && overlayView.width > 8 ? (
+        <div className="absolute inset-0 z-[1] overflow-hidden pointer-events-none">
           <GroundMap
             view={overlayView}
+            viewRef={overlayViewRef}
+            stageW={stageSize.w}
+            stageH={stageSize.h}
             brightness={cfg.map_brightness}
             lat={siteLat}
             lon={siteLon}
@@ -630,18 +717,8 @@ export default function Sky() {
           />
         </div>
       ) : null}
-      <div
-        className="pointer-events-none absolute z-[2]"
-        style={{
-          left: worldLeft,
-          top: worldTop,
-          width: worldW || "100%",
-          height: worldH || "100%",
-          transform: `scale(${zoom})`,
-          transformOrigin: "0 0",
-        }}
-      >
-        {sky ? (
+      {sky ? (
+        <div ref={gridRef} className="absolute z-[2] pointer-events-none" style={worldStyle}>
           <svg
             className="pointer-events-none absolute inset-0 h-full w-full"
             viewBox="0 0 1 1"
@@ -671,11 +748,42 @@ export default function Sky() {
                   ) : null,
                 )
               : null}
+            {cfg.map || cfg.grid || cfg.site_label ? (
+              <g>
+                <line
+                  x1={0.5 - pinLen}
+                  y1={0.5}
+                  x2={0.5 + pinLen}
+                  y2={0.5}
+                  stroke="rgba(251,191,36,0.95)"
+                  strokeWidth="1.5"
+                  vectorEffect="non-scaling-stroke"
+                />
+                <line
+                  x1={0.5}
+                  y1={0.5 - pinLen}
+                  x2={0.5}
+                  y2={0.5 + pinLen}
+                  stroke="rgba(251,191,36,0.95)"
+                  strokeWidth="1.5"
+                  vectorEffect="non-scaling-stroke"
+                />
+                <circle
+                  cx={0.5}
+                  cy={0.5}
+                  r={pinR}
+                  fill="rgba(251,191,36,0.35)"
+                  stroke="rgba(248,250,252,0.95)"
+                  strokeWidth="1.25"
+                  vectorEffect="non-scaling-stroke"
+                />
+              </g>
+            ) : null}
             {cfg.site_label && (siteName || siteCity) ? (
               <g opacity="0.9" style={{ fontFamily: "inherit" }}>
                 <line
                   x1={0.5}
-                  y1={0.512}
+                  y1={0.5 + pinLen * 1.4}
                   x2={0.5}
                   y2={0.521}
                   stroke="rgba(200,231,255,0.4)"
@@ -687,7 +795,7 @@ export default function Sky() {
                     x={0.5}
                     y={0.524}
                     fill="rgba(226,239,255,0.82)"
-                    fontSize="0.0088"
+                    fontSize={hudFont}
                     fontWeight={500}
                     textAnchor="middle"
                     dominantBaseline="hanging"
@@ -701,7 +809,7 @@ export default function Sky() {
                     x={0.5}
                     y={siteName ? 0.535 : 0.524}
                     fill="rgba(200,231,255,0.5)"
-                    fontSize="0.0066"
+                    fontSize={hudFont * 0.85}
                     fontWeight={400}
                     textAnchor="middle"
                     dominantBaseline="hanging"
@@ -723,7 +831,7 @@ export default function Sky() {
                       x={label.x}
                       y={label.y}
                       fill={alt ? "rgba(200,231,255,0.88)" : "rgba(200,231,255,0.72)"}
-                      fontSize={alt ? "0.017" : "0.015"}
+                      fontSize={alt ? hudFontLg : hudFont}
                       fontWeight={alt ? 600 : 400}
                       textAnchor="middle"
                       dominantBaseline="middle"
@@ -770,7 +878,7 @@ export default function Sky() {
                       x={c.label.x}
                       y={c.label.y}
                       fill="rgba(253,230,138,0.92)"
-                      fontSize="0.016"
+                      fontSize={hudFont}
                       textAnchor="middle"
                     >
                       {c.name}
@@ -786,7 +894,7 @@ export default function Sky() {
                       x={c.label.x}
                       y={c.label.y}
                       fill="rgba(200,231,255,0.85)"
-                      fontSize="0.018"
+                      fontSize={hudFontLg}
                       textAnchor="middle"
                     >
                       {c.name}
@@ -801,7 +909,7 @@ export default function Sky() {
                     x={s.x + 0.012}
                     y={s.y + 0.004}
                     fill="#f3c16b"
-                    fontSize="0.016"
+                    fontSize={hudFontLg}
                   >
                     {s.name}
                   </text>
@@ -810,7 +918,7 @@ export default function Sky() {
             {cfg.planets && sky.sun.visible ? (
               <g>
                 <circle cx={sky.sun.x} cy={sky.sun.y} r="0.012" fill="#fbbf24" />
-                <text x={sky.sun.x + 0.016} y={sky.sun.y} fill="#fbbf24" fontSize="0.018">
+                <text x={sky.sun.x + 0.016} y={sky.sun.y} fill="#fbbf24" fontSize={hudFontLg}>
                   Sun
                 </text>
               </g>
@@ -818,15 +926,15 @@ export default function Sky() {
             {cfg.planets && sky.moon.visible ? (
               <g>
                 <circle cx={sky.moon.x} cy={sky.moon.y} r="0.01" fill="#e8eef8" />
-                <text x={sky.moon.x + 0.016} y={sky.moon.y} fill="#e8eef8" fontSize="0.018">
+                <text x={sky.moon.x + 0.016} y={sky.moon.y} fill="#e8eef8" fontSize={hudFontLg}>
                   Moon
                 </text>
               </g>
             ) : null}
             </g>
           </svg>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       {sky && (cfg.satellites || cfg.aircraft) ? (
         <div className="absolute inset-0 z-[3]">
           {cfg.satellites ? (
@@ -842,7 +950,9 @@ export default function Sky() {
                 if (id) setSelectedAc(null);
               }}
               onPan={shiftPan}
+              onPanEnd={endPan}
               view={overlayView}
+              liveView={overlayViewRef}
               interactive={!cfg.aircraft}
             />
           ) : null}
@@ -860,7 +970,13 @@ export default function Sky() {
                 if (cfg.satellites) satLayerRef.current?.hitAt(x, y);
               }}
               onPan={shiftPan}
+              onPanEnd={endPan}
               view={overlayView}
+              liveView={overlayViewRef}
+              gps={trackGps}
+              ssr={trackSsr}
+              psr={trackPsr}
+              flightMode={flightMode}
             />
           ) : null}
         </div>
@@ -897,6 +1013,14 @@ export default function Sky() {
         onCenterView={centerView}
         onFitView={resetView}
         onFullscreen={() => void toggleFullscreen()}
+        trackGps={trackGps}
+        trackSsr={trackSsr}
+        trackPsr={trackPsr}
+        flightMode={flightMode}
+        onTrackGps={setTrackGps}
+        onTrackSsr={setTrackSsr}
+        onTrackPsr={setTrackPsr}
+        onFlightMode={setFlightMode}
       />
       {pickedAc ? (
         <AcInspector
@@ -925,7 +1049,12 @@ export default function Sky() {
   );
 }
 
+function magVisible(mag: number | undefined, limit: number) {
+  return limit > 0 && (mag ?? 99) <= limit;
+}
+
 function filterFigures(figures: Constellation[], magLimit: number): Constellation[] {
+  if (magLimit <= 0) return [];
   const out: Constellation[] = [];
   for (const fig of figures) {
     const lines = fig.lines.flatMap((line) => splitByMag(line, magLimit));
@@ -939,7 +1068,7 @@ function splitByMag(line: Pt[], magLimit: number): Pt[][] {
   const runs: Pt[][] = [];
   let run: Pt[] = [];
   for (const pt of line) {
-    if ((pt.mag ?? 99) <= magLimit) {
+    if (magVisible(pt.mag, magLimit)) {
       run.push(pt);
     } else {
       if (run.length >= 2) runs.push(run);
@@ -951,7 +1080,7 @@ function splitByMag(line: Pt[], magLimit: number): Pt[][] {
 }
 
 function wheelFactor(zoom: number, inward: boolean) {
-  const step = zoom >= 48 ? 1.4 : zoom >= 8 ? 1.25 : 1.12;
+  const step = zoom >= 64 ? 1.5 : zoom >= 16 ? 1.32 : zoom >= 8 ? 1.25 : 1.12;
   return inward ? step : 1 / step;
 }
 

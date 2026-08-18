@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -17,6 +18,81 @@ OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 CACHE_S = 7 * 24 * 3600
 MAX_PLACES = 36
+GEOCODE_AGE = 30 * 24 * 3600
+
+
+def geocode_site(settings: ZenithSettings) -> dict:
+    """Map pin: street address from Settings when it geocodes, else lat/lon."""
+    loc = settings.location
+    street = (loc.address or "").strip()
+    city = (loc.city or "").strip()
+    postcode = (loc.postcode or "").strip()
+    fallback = {
+        "lat": float(loc.latitude),
+        "lon": float(loc.longitude),
+        "source": "coordinates",
+        "query": None,
+        "label": None,
+    }
+    if not street:
+        return fallback
+    query = _address_query(street, postcode, city)
+    cache = DATA_DIR / "geocode"
+    cache.mkdir(parents=True, exist_ok=True)
+    path = cache / f"{_cache_key(query)}.json"
+    if path.is_file() and time.time() - path.stat().st_mtime < GEOCODE_AGE:
+        try:
+            hit = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            hit = None
+        if isinstance(hit, dict) and hit.get("lat") is not None:
+            return hit
+    hit = _nominatim_address(street, city, postcode) or _nominatim_freeform(query)
+    if not hit:
+        return fallback
+    row = {
+        "lat": hit["lat"],
+        "lon": hit["lon"],
+        "source": "address",
+        "query": query,
+        "label": hit.get("label"),
+    }
+    path.write_text(json.dumps(row), encoding="utf-8")
+    return row
+
+
+def address_query(street: str, postcode: str, city: str) -> str:
+    return _address_query(street, postcode, city)
+
+
+def parse_nominatim_hit(rows) -> dict | None:
+    if not isinstance(rows, list) or not rows:
+        return None
+    pick = None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("type") or row.get("addresstype") or "") in {"house", "building"}:
+            pick = row
+            break
+        if pick is None:
+            pick = row
+    if not isinstance(pick, dict):
+        return None
+    try:
+        lat, lon = float(pick["lat"]), float(pick["lon"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    label = (pick.get("display_name") or "").split(",")[0].strip() or None
+    return {"lat": lat, "lon": lon, "label": label}
+
+
+def _address_query(street: str, postcode: str, city: str) -> str:
+    parts = [street.strip()]
+    line = " ".join(p for p in (postcode.strip(), city.strip()) if p)
+    if line:
+        parts.append(line)
+    return ", ".join(parts)
 
 
 def nearby_places(settings: ZenithSettings) -> list[dict]:
@@ -90,6 +166,45 @@ def _overpass(lat: float, lon: float) -> list[dict]:
             }
         )
     return out
+
+
+def _nominatim_address(street: str, city: str, postcode: str) -> dict | None:
+    params = {
+        "format": "json",
+        "street": street,
+        "limit": 1,
+        "addressdetails": 1,
+        "countrycodes": "de",
+    }
+    if city:
+        params["city"] = city
+    if postcode:
+        params["postalcode"] = postcode
+    return parse_nominatim_hit(_nominatim_search(params))
+
+
+def _nominatim_freeform(query: str) -> dict | None:
+    return parse_nominatim_hit(
+        _nominatim_search({"format": "json", "q": query, "limit": 1, "addressdetails": 1, "countrycodes": "de"})
+    )
+
+
+def _nominatim_search(params: dict) -> list:
+    qs = urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        f"{NOMINATIM_URL}?{qs}",
+        headers={"User-Agent": USER_AGENT, "Accept": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            rows = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (OSError, urllib.error.HTTPError, json.JSONDecodeError):
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def _cache_key(query: str) -> str:
+    return hashlib.sha1(query.casefold().encode("utf-8")).hexdigest()[:16]
 
 
 def _nominatim_city(city: str, lat: float, lon: float) -> dict | None:

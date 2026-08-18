@@ -62,4 +62,5 @@ body {
 .zenith-leaflet.leaflet-container {
   background: transparent;
   font: inherit;
+  overflow: hidden;
 }

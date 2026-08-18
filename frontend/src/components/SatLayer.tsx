@@ -63,7 +63,9 @@ type Props = {
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onPan?: (dx: number, dy: number) => void;
+  onPanEnd?: () => void;
   view: OverlayView;
+  liveView?: { current: OverlayView };
   interactive?: boolean;
 };
 
@@ -82,7 +84,9 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
     selectedId,
     onSelect,
     onPan,
+    onPanEnd,
     view,
+    liveView,
     interactive = true,
   },
   ref,
@@ -90,11 +94,14 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const onPanRef = useRef(onPan);
+  const onPanEndRef = useRef(onPanEnd);
   onPanRef.current = onPan;
+  onPanEndRef.current = onPanEnd;
   const tracksRef = useRef(new Map<string, Track>());
   const dtRef = useRef(dt);
   const scaleRef = useRef(iconScale);
   const viewRef = useRef(view);
+  const liveViewRef = useRef(liveView);
   const kindsRef = useRef(kinds);
   const selectedRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
@@ -102,6 +109,7 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
   dtRef.current = dt;
   scaleRef.current = iconScale;
   viewRef.current = view;
+  liveViewRef.current = liveView;
   kindsRef.current = kinds;
   selectedRef.current = selectedId;
   onSelectRef.current = onSelect;
@@ -150,7 +158,7 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
       const h = wrap.clientHeight;
       ctx.clearRect(0, 0, w, h);
       const allow = kindsRef.current ? new Set(kindsRef.current) : null;
-      const viewNow = viewRef.current;
+      const viewNow = liveViewRef.current?.current ?? viewRef.current;
       const icon = scaleRef.current;
       const selected = selectedRef.current;
       const maxAge = Math.max(dtRef.current * 1.6, 1.2);
@@ -205,7 +213,7 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
     if (rect.width < 1 || rect.height < 1) return;
     const clickX = clientX - rect.left;
     const clickY = clientY - rect.top;
-    const viewNow = viewRef.current;
+    const viewNow = liveViewRef.current?.current ?? viewRef.current;
     const allow = kindsRef.current ? new Set(kindsRef.current) : null;
     const now = performance.now();
     const maxAge = Math.max(dtRef.current * 1.6, 1.2);
@@ -263,9 +271,11 @@ const SatLayer = forwardRef<SatLayerHandle, Props>(function SatLayer(
         const drag = dragRef.current;
         dragRef.current = null;
         e.currentTarget.releasePointerCapture(e.pointerId);
-        if (!drag?.moved) hitTest(e.clientX, e.clientY);
+        if (drag?.moved) onPanEndRef.current?.();
+        else hitTest(e.clientX, e.clientY);
       }}
       onPointerCancel={() => {
+        if (dragRef.current?.moved) onPanEndRef.current?.();
         dragRef.current = null;
       }}
     />

@@ -1,6 +1,19 @@
 import { useEffect, useRef } from "react";
 import { AC_INBOUND, acColor, acPathStroke } from "@/components/AcInspector";
-import { canvasDpr, overlayToScreen, type OverlayView } from "@/lib/overlayView";
+import { canvasDpr, overlayCenter, overlayRadiusPx, overlayToScreen, type OverlayView } from "@/lib/overlayView";
+import {
+  PSR_COLOR,
+  PSR_PERIOD_S,
+  SSR_COLOR,
+  SSR_PERIOD_S,
+  altMToFl,
+  kmhToKt,
+  psrEcho,
+  ssrEcho,
+  sweepAzimuth,
+  sweepCrossed,
+  vrateLetter,
+} from "@/lib/radar";
 
 export type AcPt = {
   x: number;
@@ -21,6 +34,7 @@ export type AcPt = {
   vrate_ms?: number;
   squawk?: string;
   category?: string;
+  typecode?: string;
   cpa_km?: number;
   tca_s?: number;
   inbound?: boolean;
@@ -41,6 +55,32 @@ type Track = {
   meta: AcPt;
 };
 
+type RadarPaint = {
+  id: string;
+  x: number;
+  y: number;
+  heading?: number;
+  groundKm?: number;
+  gsKmh?: number;
+  altM?: number;
+  vrateMs?: number;
+  name: string;
+  category?: string;
+  typecode?: string;
+  pingAt: number;
+  history: Array<{ x: number; y: number }>;
+};
+
+type DataTag = {
+  id: string;
+  name: string;
+  altM?: number;
+  gsKmh?: number;
+  vrateMs?: number;
+  typecode?: string;
+  category?: string;
+};
+
 type Props = {
   samples: AcPt[];
   dt: number;
@@ -49,7 +89,13 @@ type Props = {
   onSelect: (id: string | null) => void;
   onMiss?: (clientX: number, clientY: number) => void;
   onPan?: (dx: number, dy: number) => void;
+  onPanEnd?: () => void;
   view: OverlayView;
+  liveView?: { current: OverlayView };
+  gps?: boolean;
+  ssr?: boolean;
+  psr?: boolean;
+  flightMode?: boolean;
 };
 
 const STALE_MS = 14000;
@@ -62,25 +108,44 @@ export default function AcLayer({
   onSelect,
   onMiss,
   onPan,
+  onPanEnd,
   view,
+  liveView,
+  gps = true,
+  ssr = false,
+  psr = false,
+  flightMode = false,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
   const onPanRef = useRef(onPan);
+  const onPanEndRef = useRef(onPanEnd);
   onPanRef.current = onPan;
+  onPanEndRef.current = onPanEnd;
   const tracksRef = useRef(new Map<string, Track>());
-  const dtRef = useRef(dt);
   const scaleRef = useRef(iconScale);
   const viewRef = useRef(view);
+  const liveViewRef = useRef(liveView);
   const selectedRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
   const onMissRef = useRef(onMiss);
-  dtRef.current = dt;
+  const gpsRef = useRef(gps);
+  const ssrRef = useRef(ssr);
+  const psrRef = useRef(psr);
+  const flightRef = useRef(flightMode);
+  const ssrPaintRef = useRef(new Map<string, RadarPaint>());
+  const psrPaintRef = useRef(new Map<string, RadarPaint>());
+  const sweepRef = useRef({ ssr: 0, psr: 0 });
   scaleRef.current = iconScale;
   viewRef.current = view;
+  liveViewRef.current = liveView;
   selectedRef.current = selectedId;
   onSelectRef.current = onSelect;
   onMissRef.current = onMiss;
+  gpsRef.current = gps;
+  ssrRef.current = ssr;
+  psrRef.current = psr;
+  flightRef.current = flightMode;
 
   useEffect(() => {
     tracksRef.current = ingest(samples, dt, performance.now(), tracksRef.current);
@@ -114,15 +179,32 @@ export default function AcLayer({
       const w = wrap.clientWidth;
       const h = wrap.clientHeight;
       ctx.clearRect(0, 0, w, h);
-      const viewNow = viewRef.current;
+      const viewNow = liveViewRef.current?.current ?? viewRef.current;
       const selected = selectedRef.current;
       const size = 11 * scaleRef.current;
-      const maxAge = Math.max(dtRef.current * 1.4, 4);
       const pulse = 0.55 + 0.45 * Math.sin(now / 320);
+      if (flightRef.current) drawFlightMode(ctx, viewNow);
+      const ssrOn = ssrRef.current;
+      const psrOn = psrRef.current;
+      const gpsOn = gpsRef.current;
+      if (!ssrOn) ssrPaintRef.current.clear();
+      if (!psrOn) psrPaintRef.current.clear();
+      if (ssrOn) {
+        const az = sweepAzimuth(now, SSR_PERIOD_S);
+        pingSweep(tracksRef.current, ssrPaintRef.current, sweepRef.current.ssr, az, now);
+        sweepRef.current.ssr = az;
+        drawSweep(ctx, viewNow, az, SSR_COLOR, now, 0);
+      }
+      if (psrOn) {
+        const az = sweepAzimuth(now, PSR_PERIOD_S);
+        pingSweep(tracksRef.current, psrPaintRef.current, sweepRef.current.psr, az, now);
+        sweepRef.current.psr = az;
+        drawSweep(ctx, viewNow, az, PSR_COLOR, now, 1);
+      }
       for (const track of tracksRef.current.values()) {
         const inbound = Boolean(track.meta.inbound);
         const path = track.meta.path;
-        if (path && path.length >= 2) {
+        if (gpsOn && path && path.length >= 2) {
           drawHeadingPath(ctx, path, viewNow, track.meta.ground_km, track.meta.gs_kmh);
         }
         if (inbound && track.meta.from_x != null && track.meta.from_y != null) {
@@ -145,19 +227,21 @@ export default function AcLayer({
           ctx.stroke();
         }
       }
-      for (const track of tracksRef.current.values()) {
-        if (track.meta.rim) continue;
-        const age = Math.min((now - track.t0) / 1000, maxAge);
-        const x = track.x0 + track.vx * age;
-        const y = track.y0 + track.vy * age;
-        const [px, py] = overlayToScreen(x, y, viewNow);
-        if (px < -16 || py < -16 || px > w + 16 || py > h + 16) continue;
-        const color = acColor(track.meta.ground_km);
-        const ang = Math.hypot(track.vx, track.vy) > 1e-8 ? Math.atan2(track.vy, track.vx) + Math.PI / 2 : 0;
-        if (track.id === selected) drawTargetRing(ctx, px, py, size, color, pulse);
-        drawAirliner(ctx, px, py, ang, size, color, track.id === selected);
-        ctx.font = track.id === selected ? "700 12px ui-sans-serif, system-ui" : "600 11px ui-sans-serif, system-ui";
-        drawHudLabel(ctx, track.name, px + size * 0.9, py - 4, color);
+      if (psrOn) drawPsrPaints(ctx, psrPaintRef.current, viewNow, now, selected, pulse);
+      if (ssrOn) drawSsrPaints(ctx, ssrPaintRef.current, viewNow, now, selected, pulse, size);
+      if (gpsOn) {
+        for (const track of tracksRef.current.values()) {
+          if (track.meta.rim) continue;
+          const pos = coastPos(track, now);
+          const [px, py] = overlayToScreen(pos.x, pos.y, viewNow);
+          if (px < -16 || py < -16 || px > w + 16 || py > h + 16) continue;
+          const color = acColor(track.meta.ground_km);
+          const ang =
+            Math.hypot(track.vx, track.vy) > 1e-8 ? Math.atan2(track.vy, track.vx) + Math.PI / 2 : 0;
+          if (track.id === selected) drawTargetRing(ctx, px, py, size, color, pulse);
+          drawAirliner(ctx, px, py, ang, size, color, track.id === selected);
+          drawDataBlock(ctx, tagFromTrack(track), px, py, size, 1, color);
+        }
       }
       raf = window.requestAnimationFrame(draw);
     };
@@ -175,28 +259,47 @@ export default function AcLayer({
     if (rect.width < 1 || rect.height < 1) return;
     const clickX = clientX - rect.left;
     const clickY = clientY - rect.top;
-    const viewNow = viewRef.current;
+    const viewNow = liveViewRef.current?.current ?? viewRef.current;
     const now = performance.now();
-    const maxAge = Math.max(dtRef.current * 1.4, 4);
-    let best: Track | null = null;
+    const gpsOn = gpsRef.current;
+    const ssrOn = ssrRef.current;
+    const psrOn = psrRef.current;
+    let best: Track | RadarPaint | null = null;
     let bestD = 32;
-    for (const track of tracksRef.current.values()) {
-      const age = Math.min((now - track.t0) / 1000, maxAge);
-      const x = track.x0 + track.vx * age;
-      const y = track.y0 + track.vy * age;
-      const [px, py] = overlayToScreen(x, y, viewNow);
-      let d = Math.hypot(px - clickX, py - clickY);
-      if (track.meta.from_x != null && track.meta.from_y != null) {
-        const [fx, fy] = overlayToScreen(track.meta.from_x, track.meta.from_y, viewNow);
-        d = Math.min(d, Math.hypot(fx - clickX, fy - clickY));
-      }
+    let bestId: string | null = null;
+    const consider = (id: string, px: number, py: number, obj: Track | RadarPaint) => {
+      const d = Math.hypot(px - clickX, py - clickY);
       if (d < bestD) {
         bestD = d;
-        best = track;
+        best = obj;
+        bestId = id;
+      }
+    };
+    if (gpsOn) {
+      for (const track of tracksRef.current.values()) {
+        const pos = coastPos(track, now);
+        const [px, py] = overlayToScreen(pos.x, pos.y, viewNow);
+        consider(track.id, px, py, track);
+        if (track.meta.from_x != null && track.meta.from_y != null) {
+          const [fx, fy] = overlayToScreen(track.meta.from_x, track.meta.from_y, viewNow);
+          consider(track.id, fx, fy, track);
+        }
       }
     }
-    if (best) {
-      onSelectRef.current(best.id);
+    if (ssrOn) {
+      for (const paint of ssrPaintRef.current.values()) {
+        const [px, py] = overlayToScreen(paint.x, paint.y, viewNow);
+        consider(paint.id, px, py, paint);
+      }
+    }
+    if (psrOn) {
+      for (const paint of psrPaintRef.current.values()) {
+        const [px, py] = overlayToScreen(paint.x, paint.y, viewNow);
+        consider(paint.id, px, py, paint);
+      }
+    }
+    if (best && bestId) {
+      onSelectRef.current(bestId);
       return;
     }
     onSelectRef.current(null);
@@ -227,13 +330,358 @@ export default function AcLayer({
         const drag = dragRef.current;
         dragRef.current = null;
         e.currentTarget.releasePointerCapture(e.pointerId);
-        if (!drag?.moved) hitTest(e.clientX, e.clientY);
+        if (drag?.moved) onPanEndRef.current?.();
+        else hitTest(e.clientX, e.clientY);
       }}
       onPointerCancel={() => {
+        if (dragRef.current?.moved) onPanEndRef.current?.();
         dragRef.current = null;
       }}
     />
   );
+}
+
+function coastPos(track: Track, now: number) {
+  const age = (now - track.t0) / 1000;
+  return { x: track.x0 + track.vx * age, y: track.y0 + track.vy * age };
+}
+
+function sameMotion(a: AcPt, b: AcPt) {
+  return a.x === b.x && a.y === b.y && a.x2 === b.x2 && a.y2 === b.y2;
+}
+
+function trackAzimuth(x: number, y: number) {
+  return (Math.atan2(y - 0.5, x - 0.5) * (180 / Math.PI) + 90 + 360) % 360;
+}
+
+function pingSweep(
+  tracks: Map<string, Track>,
+  paints: Map<string, RadarPaint>,
+  prevAz: number,
+  nextAz: number,
+  now: number,
+) {
+  for (const track of tracks.values()) {
+    if (track.meta.rim) continue;
+    const pos = coastPos(track, now);
+    const az = trackAzimuth(pos.x, pos.y);
+    const first = !paints.has(track.id);
+    if (!first && !sweepCrossed(prevAz, nextAz, az)) continue;
+    const prev = paints.get(track.id);
+    const history = prev ? [...prev.history, { x: prev.x, y: prev.y }].slice(-22) : [];
+    paints.set(track.id, {
+      id: track.id,
+      x: pos.x,
+      y: pos.y,
+      heading: track.meta.heading,
+      groundKm: track.meta.ground_km,
+      gsKmh: track.meta.gs_kmh,
+      altM: track.meta.alt_m,
+      vrateMs: track.meta.vrate_ms,
+      name: track.name,
+      category: track.meta.category,
+      typecode: track.meta.typecode,
+      pingAt: now,
+      history,
+    });
+  }
+  for (const id of [...paints.keys()]) {
+    if (!tracks.has(id)) paints.delete(id);
+  }
+}
+
+function drawSweep(
+  ctx: CanvasRenderingContext2D,
+  view: OverlayView,
+  az: number,
+  color: string,
+  now: number,
+  seed: number,
+) {
+  const [cx, cy] = overlayCenter(view);
+  const R = overlayRadiusPx(view);
+  const theta = ((az - 90) * Math.PI) / 180;
+  const trail = 52;
+  ctx.save();
+  for (let i = trail; i >= 0; i--) {
+    const a = ((az - i * 0.85 + 360) % 360) - 90;
+    const t = (a * Math.PI) / 180;
+    const fade = 1 - i / trail;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(t) * R, cy + Math.sin(t) * R);
+    ctx.strokeStyle = color.replace("0.92", `${0.055 * fade * fade}`);
+    ctx.lineWidth = i === 0 ? 2.4 : 14;
+    ctx.stroke();
+  }
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.lineTo(cx + Math.cos(theta) * R, cy + Math.sin(theta) * R);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  for (let i = 0; i < 28; i++) {
+    const u = (i + 0.35) / 28;
+    const wobble = Math.sin(now / 90 + i * 1.7 + seed * 4) * 0.012;
+    const r = Math.max(0, Math.min(1, u + wobble)) * R;
+    const px = cx + Math.cos(theta) * r;
+    const py = cy + Math.sin(theta) * r;
+    ctx.beginPath();
+    ctx.arc(px, py, i % 4 === 0 ? 1.8 : 1.05, 0, Math.PI * 2);
+    ctx.fillStyle = color.replace("0.92", `${0.18 + 0.55 * (1 - u)}`);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawFlightMode(ctx: CanvasRenderingContext2D, view: OverlayView) {
+  const [cx, cy] = overlayCenter(view);
+  const R = overlayRadiusPx(view);
+  ctx.save();
+  ctx.strokeStyle = "rgba(45,212,191,0.28)";
+  ctx.fillStyle = "rgba(165,243,252,0.55)";
+  ctx.lineWidth = 1;
+  for (const km of [10, 20, 40, 80]) {
+    const r = R * (km / 80);
+    ctx.setLineDash(km === 80 ? [] : [3, 5]);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = "600 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(`${km} KM`, cx, cy - r + 2);
+  }
+  ctx.strokeStyle = "rgba(125,211,252,0.2)";
+  ctx.setLineDash([2, 10]);
+  for (let az = 0; az < 360; az += 30) {
+    const t = ((az - 90) * Math.PI) / 180;
+    ctx.beginPath();
+    ctx.moveTo(cx + Math.cos(t) * R * 0.08, cy + Math.sin(t) * R * 0.08);
+    ctx.lineTo(cx + Math.cos(t) * R, cy + Math.sin(t) * R);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function paintDim(ageMs: number, periodS: number) {
+  return 0.22 + 0.78 * Math.exp(-ageMs / 1000 / (periodS * 0.55));
+}
+
+function drawHistory(
+  ctx: CanvasRenderingContext2D,
+  paint: RadarPaint,
+  view: OverlayView,
+  color: string,
+) {
+  const raw = [...paint.history, { x: paint.x, y: paint.y }];
+  const pts = raw.map((pt) => overlayToScreen(pt.x, pt.y, view));
+  if (pts.length < 2) return;
+  const n = pts.length;
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < n; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+  ctx.strokeStyle = color.replace("0.92", "0.18");
+  ctx.lineWidth = 7;
+  ctx.stroke();
+  ctx.strokeStyle = color.replace("0.92", "0.42");
+  ctx.lineWidth = 2.4;
+  ctx.stroke();
+  pts.slice(0, -1).forEach(([hx, hy], i) => {
+    const t = (i + 1) / n;
+    const r = 2.6 + t * 4.2;
+    ctx.beginPath();
+    ctx.arc(hx, hy, r * 2.1, 0, Math.PI * 2);
+    ctx.fillStyle = color.replace("0.92", `${0.08 + t * 0.16}`);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(hx, hy, r, 0, Math.PI * 2);
+    ctx.fillStyle = color.replace("0.92", `${0.22 + t * 0.5}`);
+    ctx.fill();
+  });
+  ctx.restore();
+}
+
+function drawHeadingTick(
+  ctx: CanvasRenderingContext2D,
+  view: OverlayView,
+  x: number,
+  y: number,
+  heading: number | undefined,
+  color: string,
+) {
+  if (heading == null || !Number.isFinite(heading)) return;
+  const [px, py] = overlayToScreen(x, y, view);
+  const R = overlayRadiusPx(view);
+  const pxPerKm = R / 80;
+  const len = 10 * pxPerKm;
+  const t = ((heading - 90) * Math.PI) / 180;
+  ctx.save();
+  ctx.setLineDash([5, 4]);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.15;
+  ctx.beginPath();
+  ctx.moveTo(px, py);
+  ctx.lineTo(px + Math.cos(t) * len, py + Math.sin(t) * len);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawSsrPaints(
+  ctx: CanvasRenderingContext2D,
+  paints: Map<string, RadarPaint>,
+  view: OverlayView,
+  now: number,
+  selected: string | null,
+  pulse: number,
+  size: number,
+) {
+  for (const paint of paints.values()) {
+    const age = now - paint.pingAt;
+    const dim = paintDim(age, SSR_PERIOD_S);
+    const echo = ssrEcho(paint.groundKm ?? 40);
+    const alpha = Math.min(1, dim * (0.45 + 0.55 * echo));
+    const [px, py] = overlayToScreen(paint.x, paint.y, view);
+    const flash = age < 180 ? 1 : alpha;
+    ctx.save();
+    ctx.globalAlpha = flash;
+    drawHistory(ctx, paint, view, SSR_COLOR);
+    drawHeadingTick(ctx, view, paint.x, paint.y, paint.heading, SSR_COLOR);
+    if (paint.id === selected) drawTargetRing(ctx, px, py, size, SSR_COLOR, pulse);
+    const ping = age < 220;
+    ctx.beginPath();
+    ctx.arc(px, py, ping ? 7 : 4.2, 0, Math.PI * 2);
+    ctx.fillStyle = ping ? "rgba(224,255,255,0.95)" : SSR_COLOR;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(px, py, ping ? 11 : 6.2, 0, Math.PI * 2);
+    ctx.strokeStyle = SSR_COLOR;
+    ctx.lineWidth = ping ? 2 : 1.2;
+    ctx.stroke();
+    drawDataBlock(ctx, tagFromPaint(paint), px, py, size, flash, SSR_COLOR);
+    ctx.restore();
+  }
+}
+
+function drawPsrPaints(
+  ctx: CanvasRenderingContext2D,
+  paints: Map<string, RadarPaint>,
+  view: OverlayView,
+  now: number,
+  selected: string | null,
+  pulse: number,
+) {
+  for (const paint of paints.values()) {
+    const age = now - paint.pingAt;
+    const dim = paintDim(age, PSR_PERIOD_S);
+    const echo = psrEcho(paint.groundKm ?? 40);
+    const alpha = Math.min(1, dim * echo);
+    if (alpha < 0.05) continue;
+    const [px, py] = overlayToScreen(paint.x, paint.y, view);
+    ctx.save();
+    ctx.globalAlpha = age < 160 ? 1 : alpha;
+    drawHistory(ctx, paint, view, PSR_COLOR);
+    drawHeadingTick(ctx, view, paint.x, paint.y, paint.heading, PSR_COLOR);
+    const r = 2.4 + echo * 3.2;
+    if (paint.id === selected) drawTargetRing(ctx, px, py, r + 4, PSR_COLOR, pulse);
+    ctx.beginPath();
+    ctx.arc(px, py, age < 160 ? r + 3 : r, 0, Math.PI * 2);
+    ctx.fillStyle = PSR_COLOR;
+    ctx.fill();
+    drawDataBlock(ctx, tagFromPaint(paint), px, py, Math.max(r, 6), age < 160 ? 1 : alpha, PSR_COLOR);
+    ctx.restore();
+  }
+}
+
+function tagFromTrack(track: Track): DataTag {
+  return {
+    id: track.id,
+    name: track.name,
+    altM: track.meta.alt_m,
+    gsKmh: track.meta.gs_kmh,
+    vrateMs: track.meta.vrate_ms,
+    typecode: track.meta.typecode,
+    category: track.meta.category,
+  };
+}
+
+function tagFromPaint(paint: RadarPaint): DataTag {
+  return {
+    id: paint.id,
+    name: paint.name,
+    altM: paint.altM,
+    gsKmh: paint.gsKmh,
+    vrateMs: paint.vrateMs,
+    typecode: paint.typecode,
+    category: paint.category,
+  };
+}
+
+function tagLines(tag: DataTag): [string, string, string] {
+  const fl = altMToFl(tag.altM);
+  const kt = kmhToKt(tag.gsKmh);
+  const trend = vrateLetter(tag.vrateMs);
+  const callsign = (tag.name || tag.id || "----").trim().toUpperCase();
+  const alt = fl != null ? String(fl).padStart(3, "0") : "---";
+  const spd = kt != null ? Math.round(kt).toString().padStart(3, "0") : "---";
+  const type =
+    (tag.typecode || "").trim().toUpperCase() ||
+    (tag.category && tag.category !== "Aircraft" ? tag.category : "") ||
+    (tag.id || "").slice(0, 6).toUpperCase() ||
+    "----";
+  return [callsign, `${alt} ${trend} ${spd}`, type];
+}
+
+function drawDataBlock(
+  ctx: CanvasRenderingContext2D,
+  tag: DataTag,
+  px: number,
+  py: number,
+  size: number,
+  alpha: number,
+  color: string,
+) {
+  const lines = tagLines(tag);
+  const lineH = 13;
+  const padX = 6;
+  const padY = 4;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0.15, alpha);
+  ctx.font = "600 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  let boxW = 0;
+  for (const line of lines) boxW = Math.max(boxW, ctx.measureText(line).width);
+  boxW = Math.ceil(boxW) + padX * 2;
+  const boxH = lines.length * lineH + padY * 2 - 2;
+  const bx = Math.round(px + size * 1.55 + 12);
+  const by = Math.round(py - boxH + 6);
+  ctx.beginPath();
+  ctx.moveTo(px + 5, py - 1);
+  ctx.lineTo(bx - 2, by + Math.min(14, boxH * 0.4));
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = Math.max(0.2, alpha * 0.7);
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.globalAlpha = Math.max(0.15, alpha);
+  ctx.beginPath();
+  if (typeof ctx.roundRect === "function") ctx.roundRect(bx, by, boxW, boxH, 3);
+  else ctx.rect(bx, by, boxW, boxH);
+  ctx.fillStyle = "rgba(4, 16, 24, 0.78)";
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.globalAlpha = Math.max(0.2, alpha * 0.55);
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.globalAlpha = Math.max(0.2, alpha);
+  lines.forEach((line, i) => {
+    drawHudLabel(ctx, line, bx + padX, by + padY + i * lineH, i === 0 ? "#f8fafc" : color, "left", "top");
+  });
+  ctx.restore();
 }
 
 function ingest(samples: AcPt[], dt: number, now: number, prev: Map<string, Track>): Map<string, Track> {
@@ -243,21 +691,23 @@ function ingest(samples: AcPt[], dt: number, now: number, prev: Map<string, Trac
   for (const s of samples) {
     const id = s.id || s.icao24 || s.name || "";
     if (!id) continue;
+    const old = prev.get(id);
+    if (old && sameMotion(old.meta, s)) {
+      next.set(id, { ...old, name: s.name || old.name, meta: s });
+      continue;
+    }
     const vx = s.x2 != null ? (s.x2 - s.x) / look : 0;
     const vy = s.y2 != null ? (s.y2 - s.y) / look : 0;
-    const old = prev.get(id);
     let x0 = s.x;
     let y0 = s.y;
     let ovx = vx;
     let ovy = vy;
     if (old) {
-      const age = (now - old.t0) / 1000;
-      const cx = old.x0 + old.vx * age;
-      const cy = old.y0 + old.vy * age;
-      x0 = cx;
-      y0 = cy;
-      ovx = (s.x + vx * catchup - cx) / catchup;
-      ovy = (s.y + vy * catchup - cy) / catchup;
+      const pos = coastPos(old, now);
+      x0 = pos.x;
+      y0 = pos.y;
+      ovx = (s.x + vx * catchup - pos.x) / catchup;
+      ovy = (s.y + vy * catchup - pos.y) / catchup;
     }
     next.set(id, { id, name: s.name || id, x0, y0, vx: ovx, vy: ovy, t0: now, meta: s });
   }

@@ -37,7 +37,8 @@ def default_timezone() -> str:
 class LocationSettings(BaseModel):
     latitude: float = _f(
         "Site latitude in decimal degrees (positive north). Used for day/night, moon mode, "
-        "satellite passes, and aurora probability.",
+        "satellite passes, aircraft, and the Sky map. Saving a street address overwrites this "
+        "with the geocoded house point.",
         default=0.0,
         ge=-90,
         le=90,
@@ -433,13 +434,14 @@ class SkySettings(BaseModel):
     )
     mag_limit: float = _f(
         "Faintest catalog stars drawn on the Sky overlay (and painted by the simulator). "
-        "Constellation and asterism lines only connect stars at or brighter than this.",
+        "Constellation and asterism lines only connect stars at or brighter than this. "
+        "0 hides all catalog stars.",
         default=5.0,
-        ge=1.0,
+        ge=0.0,
         le=6.0,
     )
     star_name_mag: float = _f(
-        "Name catalog stars brighter than this magnitude on the Sky page.",
+        "Name catalog stars brighter than this magnitude on the Sky page. 0 hides all names.",
         default=1.85,
         ge=0.0,
         le=6.0,

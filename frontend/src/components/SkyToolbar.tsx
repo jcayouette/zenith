@@ -52,7 +52,7 @@ type NowSat = {
   az?: number;
 };
 
-export type PanelId = "layers" | "types" | "fit" | "now";
+export type PanelId = "layers" | "types" | "fit" | "now" | "track";
 
 const LAYER_LABEL: Record<LayerKey, string> = {
   constellations: "Constellations",
@@ -94,6 +94,14 @@ type Props = {
   onCenterView: () => void;
   onFitView: () => void;
   onFullscreen: () => void;
+  trackGps: boolean;
+  trackSsr: boolean;
+  trackPsr: boolean;
+  flightMode: boolean;
+  onTrackGps: (on: boolean) => void;
+  onTrackSsr: (on: boolean) => void;
+  onTrackPsr: (on: boolean) => void;
+  onFlightMode: (on: boolean) => void;
 };
 
 export default function SkyToolbar(props: Props) {
@@ -124,6 +132,14 @@ export default function SkyToolbar(props: Props) {
     onCenterView,
     onFitView,
     onFullscreen,
+    trackGps,
+    trackSsr,
+    trackPsr,
+    flightMode,
+    onTrackGps,
+    onTrackSsr,
+    onTrackPsr,
+    onFlightMode,
   } = props;
 
   function toggle(id: PanelId) {
@@ -149,6 +165,9 @@ export default function SkyToolbar(props: Props) {
           </ToolBtn>
           <ToolBtn active={panel === "now"} onClick={() => toggle("now")}>
             Now
+          </ToolBtn>
+          <ToolBtn active={panel === "track"} onClick={() => toggle("track")} disabled={!cfg.aircraft}>
+            Track
           </ToolBtn>
         </div>
         {panel === "layers" ? (
@@ -290,7 +309,7 @@ export default function SkyToolbar(props: Props) {
               />
               <Slider
                 label="Star name mag"
-                hint="Label named stars at or brighter than this (lower = fewer names)."
+                hint="Label named stars at or brighter than this. 0 hides all names."
                 value={cfg.star_name_mag}
                 min={0}
                 max={6}
@@ -301,9 +320,9 @@ export default function SkyToolbar(props: Props) {
               />
               <Slider
                 label="Mag limit"
-                hint="Faintest overlay stars and constellation vertices. 5 is a dark-site sky."
+                hint="Faintest overlay stars. 0 hides all catalog stars. 5 is a dark-site sky."
                 value={cfg.mag_limit}
-                min={1}
+                min={0}
                 max={6}
                 step={0.1}
                 format={(v) => v.toFixed(1)}
@@ -332,6 +351,39 @@ export default function SkyToolbar(props: Props) {
                 onCommit={onCommitSlider}
               />
             </div>
+          </Panel>
+        ) : null}
+        {panel === "track" && cfg.aircraft ? (
+          <Panel title="Tracking">
+            <ul className="space-y-3">
+              <TrackSwitch
+                label="GPS"
+                hint="Live ADS-B. Smooth track, full identity."
+                on={trackGps}
+                onChange={onTrackGps}
+              />
+              <TrackSwitch
+                label="SSR"
+                hint="Secondary radar, 4.8 RPM (~12.5 s). Transponder data block. 3.0 µs delay."
+                on={trackSsr}
+                onChange={onTrackSsr}
+              />
+              <TrackSwitch
+                label="PSR"
+                hint="Primary radar, 13 RPM (~4.6 s). Echo only, 1/R⁴. Data tag still shown."
+                on={trackPsr}
+                onChange={onTrackPsr}
+              />
+              <TrackSwitch
+                label="Flight"
+                hint="Range rings and radials. Works with or without the street map."
+                on={flightMode}
+                onChange={onFlightMode}
+              />
+            </ul>
+            <p className="mt-3 text-[11px] leading-snug text-white/40">
+              Sweep paints freeze until the beam returns, then snap with a phosphor trail. GPS stays realtime.
+            </p>
           </Panel>
         ) : null}
         {panel === "now" ? (
@@ -439,6 +491,42 @@ function Panel({ title, children }: { title: string; children: ReactNode }) {
       <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">{title}</p>
       <div className="mt-3">{children}</div>
     </div>
+  );
+}
+
+function TrackSwitch({
+  label,
+  hint,
+  on,
+  onChange,
+}: {
+  label: string;
+  hint: string;
+  on: boolean;
+  onChange: (on: boolean) => void;
+}) {
+  return (
+    <li className="flex items-start justify-between gap-3">
+      <span>
+        <span className="block text-sm text-white/80">{label}</span>
+        <span className="mt-0.5 block text-[11px] leading-snug text-white/40">{hint}</span>
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        onClick={() => onChange(!on)}
+        className={`relative mt-0.5 h-6 w-10 shrink-0 rounded-full transition-colors ${
+          on ? "bg-aurora" : "bg-white/15"
+        }`}
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+            on ? "translate-x-4" : "translate-x-0"
+          }`}
+        />
+      </button>
+    </li>
   );
 }
 

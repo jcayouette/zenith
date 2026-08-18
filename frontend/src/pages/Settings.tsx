@@ -19,7 +19,7 @@ type JsonSchema = {
 type Values = Record<string, unknown>;
 
 const GROUP_COPY: Record<string, string> = {
-    location: "Coordinates, address, and city. The Sky map is centred here and labels nearby towns.",
+    location: "Coordinates, address, and city. Saving a street address writes the house lat/lon used by Sky, aircraft, and the map.",
   camera: "Sensor, archive, and capture pipeline.",
   picamera2: "Raspberry Pi HQ / IMX477 ISP.",
   indi: "USB astro cameras via indiserver.",

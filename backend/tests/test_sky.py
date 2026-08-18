@@ -433,6 +433,7 @@ class AircraftTests(unittest.TestCase):
                         "baro_rate": -96,
                         "squawk": "7541",
                         "category": "A5",
+                        "t": "B738",
                     },
                     {"hex": "gnd001", "lat": 49.63, "lon": 10.88, "alt_baro": "ground"},
                 ],
@@ -444,6 +445,7 @@ class AircraftTests(unittest.TestCase):
         self.assertEqual(rows[0][1], "BAW130")
         self.assertGreater(rows[0][7], 12000)
         self.assertFalse(rows[0][8])
+        self.assertEqual(rows[0][18], "B738")
 
 
 class PlacesTests(unittest.TestCase):
@@ -461,6 +463,50 @@ class PlacesTests(unittest.TestCase):
         self.assertEqual(names[0], "Erlangen")
         self.assertEqual(rows[0]["kind"], "city")
         self.assertIn("Bamberg", names)
+
+    def test_address_query_joins_street_and_city(self):
+        from zenith.sky.places import address_query
+
+        self.assertEqual(address_query("Ringstrasse 12a", "91091", "Grossenseebach"), "Ringstrasse 12a, 91091 Grossenseebach")
+
+    def test_parse_nominatim_prefers_house(self):
+        from zenith.sky.places import parse_nominatim_hit
+
+        row = parse_nominatim_hit(
+            [
+                {"lat": "49.63", "lon": "10.87", "type": "village", "display_name": "town"},
+                {
+                    "lat": "49.6278487",
+                    "lon": "10.8792215",
+                    "addresstype": "place",
+                    "type": "house",
+                    "display_name": "12a, Ringstraße, Großenseebach",
+                },
+            ]
+        )
+        self.assertAlmostEqual(row["lat"], 49.6278487)
+        self.assertAlmostEqual(row["lon"], 10.8792215)
+    def test_geocode_without_street_uses_coordinates(self):
+        from zenith.config.schema import ZenithSettings
+        from zenith.sky.places import geocode_site
+
+        settings = ZenithSettings()
+        settings.location.latitude = 49.6314
+        settings.location.longitude = 10.8772
+        settings.location.address = ""
+        row = geocode_site(settings)
+        self.assertEqual(row["source"], "coordinates")
+        self.assertAlmostEqual(row["lat"], 49.6314)
+
+    def test_settings_put_without_address_keeps_coordinates(self):
+        from zenith.api.routes.settings import _apply_geocoded_site
+
+        payload = {
+            "location": {"latitude": 49.6314, "longitude": 10.8772, "address": ""},
+        }
+        out = _apply_geocoded_site(payload)
+        self.assertEqual(out["location"]["latitude"], 49.6314)
+        self.assertEqual(out["location"]["longitude"], 10.8772)
 
 
 class AcmetaTests(unittest.TestCase):

@@ -145,6 +145,9 @@ def catalog_stars_xy(
     loc = settings.location
     stars = load_stars()
     limit = settings.sky.mag_limit if mag_limit is None else mag_limit
+    if limit <= 0:
+        empty = np.asarray([], dtype=np.float64)
+        return empty, empty, empty
     pick = stars[stars[:, 2] <= limit]
     alt, az = eq_to_altaz(pick[:, 0], pick[:, 1], loc.latitude, lst_deg(loc.longitude, utc))
     xs, ys, vis = altaz_to_xy(

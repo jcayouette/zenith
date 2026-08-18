@@ -4,6 +4,7 @@ from fastapi import APIRouter, Request
 
 from zenith.config.schema import ZenithSettings
 from zenith.config.store import discard_cache, load_settings, merge_settings, persist_cache, replace_settings
+from zenith.sky.places import geocode_site
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -21,7 +22,7 @@ def get_schema():
 @router.put("")
 def put_settings(payload: dict, request: Request):
     before = load_settings()
-    settings = replace_settings(payload)
+    settings = replace_settings(_apply_geocoded_site(payload))
     if _pipeline_changed(before, settings):
         request.app.state.capture.request_reload()
     return settings.model_dump(mode="json")
@@ -47,6 +48,20 @@ def revert_settings(request: Request):
     settings = discard_cache()
     request.app.state.capture.request_reload()
     return settings.model_dump(mode="json")
+
+
+def _apply_geocoded_site(payload: dict) -> dict:
+    loc = payload.get("location")
+    if not isinstance(loc, dict) or not str(loc.get("address") or "").strip():
+        return payload
+    draft = ZenithSettings.model_validate(payload)
+    row = geocode_site(draft)
+    if row.get("source") != "address":
+        return payload
+    next_loc = dict(loc)
+    next_loc["latitude"] = float(row["lat"])
+    next_loc["longitude"] = float(row["lon"])
+    return {**payload, "location": next_loc}
 
 
 def _pipeline_changed(before: ZenithSettings, after: ZenithSettings) -> bool:

@@ -12,7 +12,7 @@ from zenith.sky.acmeta import lookup_aircraft, lookup_route
 from zenith.sky.aircraft import build_aircraft
 from zenith.sky.groundmap import map_png, tile_png
 from zenith.sky.layers import build_sats, build_sky
-from zenith.sky.places import nearby_places
+from zenith.sky.places import geocode_site, nearby_places
 from zenith.sky.satcat import describe_sat, lookup_satcat
 from zenith.sky.tle import refresh_tles
 
@@ -121,6 +121,13 @@ def sky_maptile(z: int, x: int, y: int):
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+@router.get("/sky/site")
+def sky_site():
+    """Map centre: geocoded Settings address, otherwise lat/lon."""
+    settings = load_settings()
+    return geocode_site(settings)
 
 
 @router.get("/sky/places")

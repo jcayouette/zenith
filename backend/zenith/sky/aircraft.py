@@ -370,6 +370,7 @@ def parse_adsb_ac(payload: dict, now_s: float) -> list:
         tpos = now_s - float(seen)
         hexid = str(ac.get("hex") or "").lower().lstrip("~")
         flight = (ac.get("flight") or "").strip()
+        typecode = str(ac.get("t") or ac.get("type") or "").strip().upper() or None
         out.append(
             [
                 hexid,
@@ -390,6 +391,7 @@ def parse_adsb_ac(payload: dict, now_s: float) -> list:
                 False,
                 0,
                 ADSB_CAT.get(str(ac.get("category") or ""), 0),
+                typecode,
             ]
         )
     return out
@@ -476,7 +478,7 @@ def _project(states: list, obs_lat: float, obs_lon: float, obs_alt_m: float, now
     if not states:
         return []
     icao, names, countries, lats, lons, alts = [], [], [], [], [], []
-    tracks, speeds, vrates, squawks, cats, ages = [], [], [], [], [], []
+    tracks, speeds, vrates, squawks, cats, ages, types = [], [], [], [], [], [], []
     for row in states:
         if not isinstance(row, (list, tuple)) or len(row) < 8:
             continue
@@ -501,6 +503,8 @@ def _project(states: list, obs_lat: float, obs_lon: float, obs_alt_m: float, now
         cat = int(row[17]) if len(row) > 17 and row[17] is not None else 0
         cats.append(cat)
         ages.append(age)
+        typecode = str(row[18]).strip().upper() if len(row) > 18 and row[18] else ""
+        types.append(typecode)
     if not lats:
         return []
     lat_a = np.array(lats)
@@ -558,6 +562,7 @@ def _project(states: list, obs_lat: float, obs_lon: float, obs_alt_m: float, now
                 "vrate_ms": round(float(vr_a[i]), 1) if vr_a[i] else 0.0,
                 "squawk": squawks[i] or None,
                 "category": CATEGORY.get(cats[i], "Aircraft"),
+                "typecode": types[i] or None,
                 "cpa_km": round(float(cpa[i]), 1),
                 "tca_s": round(float(tca[i]), 0),
                 "inbound": coming,
