@@ -374,6 +374,27 @@ class ProductSettings(BaseModel):
         ge=80,
         le=1280,
     )
+    detections_enabled: bool = _f(
+        "Find streaks on night frames (meteors, aircraft, satellites) and list them on Detections. "
+        "Uses frame-to-frame difference; cloudy frames are skipped.",
+        default=True,
+        title="Streak detections",
+    )
+    detections_min_length_px: int = _f(
+        "Minimum streak length in pixels on the 320-wide detection image. "
+        "Raise this if insects and noise show up; lower it to catch faint meteors.",
+        default=14,
+        ge=4,
+        le=120,
+        title="Min streak length",
+    )
+    detections_min_aspect: float = _f(
+        "How elongated a blob must be (length / width). Stars and hot pixels are round; meteors are not.",
+        default=3.2,
+        ge=1.5,
+        le=20.0,
+        title="Min streak aspect",
+    )
 
 
 class OverlaySettings(BaseModel):
@@ -483,6 +504,37 @@ class SkySettings(BaseModel):
     )
 
 
+class DewSettings(BaseModel):
+    mode: Literal["off", "on", "auto"] = _f(
+        "USB dew pad: off, forced on, or auto from Open-Meteo RH / dew point at the site. "
+        "Auto only heats at night when the air is wet enough — not 24/7.",
+        default="off",
+        title="Dew heater",
+    )
+    interval_min: int = _f(
+        "How often auto re-checks humidity (minutes). 3–10 is for testing; 10–15 is overnight.",
+        default=10,
+        ge=1,
+        le=60,
+        title="Check interval",
+    )
+    rh_on: float = _f(
+        "Turn the pad on at night when relative humidity is at least this percent.",
+        default=80,
+        ge=50,
+        le=100,
+        title="RH on threshold",
+    )
+    spread_c: float = _f(
+        "Turn the pad on at night when air temp minus dew point is this many °C or less. "
+        "The dome runs colder than the forecast, so 4 °C is a typical summer trip.",
+        default=4.0,
+        ge=0.5,
+        le=12.0,
+        title="Dew-spread on",
+    )
+
+
 class ZenithSettings(BaseModel):
     location: LocationSettings = Field(default_factory=LocationSettings)
     camera: CameraCommonSettings = Field(default_factory=CameraCommonSettings)
@@ -512,5 +564,6 @@ class ZenithSettings(BaseModel):
     overlay: OverlaySettings = Field(default_factory=OverlaySettings)
     sky: SkySettings = Field(default_factory=SkySettings)
     products: ProductSettings = Field(default_factory=ProductSettings)
+    dew: DewSettings = Field(default_factory=DewSettings)
 
     model_config = {"title": "Zenith settings", "extra": "ignore"}

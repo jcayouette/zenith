@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
@@ -15,6 +15,7 @@ type ProcessedItem = {
   mtime: number;
   media: "image" | "video";
   archive_url: string;
+  meta?: { frames_used?: number; frames_seen?: number; mean_stars?: number };
 };
 
 type ProcessedIndex = {
@@ -73,8 +74,10 @@ function useProcessedFlip() {
 }
 
 export default function Processed() {
+  const client = useQueryClient();
   const [filter, setFilter] = useState<"all" | Category>("all");
   const [active, setActive] = useState<ProcessedItem | null>(null);
+  const [rebuildDay, setRebuildDay] = useState<string | null>(null);
   const flip = useProcessedFlip();
   const query = useQuery({
     queryKey: ["processed", filter],
@@ -83,6 +86,18 @@ export default function Processed() {
       return fetch(`/api/processed${q}`).then((r) => r.json() as Promise<ProcessedIndex>);
     },
     refetchInterval: 15_000,
+  });
+  const rebuild = useMutation({
+    mutationFn: async (day: string) => {
+      const res = await fetch(`/api/processed/startrails/${day}`, { method: "POST" });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<{ frames_used: number; frames_seen: number; wrote: boolean }>;
+    },
+    onMutate: (day) => setRebuildDay(day),
+    onSettled: () => {
+      setRebuildDay(null);
+      void client.invalidateQueries({ queryKey: ["processed"] });
+    },
   });
   const items = query.data?.items ?? [];
   const counts = query.data?.counts ?? { keograms: 0, startrails: 0, timelapses: 0 };
@@ -104,7 +119,8 @@ export default function Processed() {
           <p className="mt-2 max-w-2xl text-sm text-white/50">
             Keograms, startrails, and timelapses live under{" "}
             <code className="text-white/70">processed/&#123;type&#125;/YYYY-MM-DD/</code>. Capture
-            frames stay in Archive.
+            frames stay in Archive. Startrails max-stack every clear night frame; use Rebuild if a
+            night finished before the stack was enabled.
           </p>
         </div>
         <div className="flex rounded-full bg-white/5 p-1 text-sm">
@@ -137,11 +153,21 @@ export default function Processed() {
 
       {grouped.map(([day, rows]) => (
         <section key={day} className="space-y-3">
-          <div className="flex items-baseline justify-between">
+          <div className="flex items-baseline justify-between gap-3">
             <h2 className="display text-2xl text-star">{day}</h2>
-            <Link to={`/archive/night/${day}`} className="text-sm text-ice/80 hover:text-ice">
-              Open archive
-            </Link>
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => rebuild.mutate(day)}
+                disabled={rebuildDay === day}
+                className="text-sm text-white/55 hover:text-ice disabled:text-white/30"
+              >
+                {rebuildDay === day ? "Stacking startrails…" : "Rebuild startrails"}
+              </button>
+              <Link to={`/archive/night/${day}`} className="text-sm text-ice/80 hover:text-ice">
+                Open archive
+              </Link>
+            </div>
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {rows.map((item) => (
@@ -172,6 +198,12 @@ export default function Processed() {
                 <div className="p-4">
                   <p className="text-sm text-white/90">{item.label}</p>
                   <p className="mt-1 text-xs uppercase tracking-wide text-white/40">{item.category}</p>
+                  {item.meta?.frames_used != null ? (
+                    <p className="mt-1 text-xs text-white/45">
+                      {item.meta.frames_used} stacked
+                      {item.meta.mean_stars != null ? ` · ${Math.round(item.meta.mean_stars)} stars` : ""}
+                    </p>
+                  ) : null}
                   <p className="mt-1 text-xs text-white/35">{formatBytes(item.bytes)}</p>
                 </div>
               </button>

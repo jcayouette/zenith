@@ -8,8 +8,9 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from zenith import __version__
-from zenith.api.routes import archive, live, processed, settings, sky, status
+from zenith.api.routes import archive, detections, dew, live, processed, settings, sky, status
 from zenith.capture.service import CaptureService, LiveHub
+from zenith.io.dew import DewHeater
 from zenith.paths import FRONTEND_DIST, ensure_data_dir
 
 _DEV_LANDING = """<!doctype html>
@@ -43,10 +44,14 @@ async def lifespan(app: FastAPI):
     ensure_data_dir()
     hub = LiveHub()
     capture = CaptureService(hub)
+    heater = DewHeater()
     app.state.hub = hub
     app.state.capture = capture
+    app.state.dew = heater
     capture.start()
+    heater.start()
     yield
+    await heater.stop()
     await capture.stop()
 
 
@@ -59,10 +64,12 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(status.router, prefix="/api")
+    app.include_router(dew.router, prefix="/api")
     app.include_router(settings.router, prefix="/api")
     app.include_router(live.router, prefix="/api")
     app.include_router(archive.router, prefix="/api")
     app.include_router(processed.router, prefix="/api")
+    app.include_router(detections.router, prefix="/api")
     app.include_router(sky.router, prefix="/api")
     _mount_frontend(app)
     return app

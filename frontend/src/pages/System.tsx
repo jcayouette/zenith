@@ -1,4 +1,25 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+
+type DewState = {
+  mode: "off" | "on" | "auto";
+  interval_min: number;
+  rh_on: number;
+  spread_c: number;
+  usb_on: boolean | null;
+  wanted: boolean;
+  reason: string;
+  error: string | null;
+  checked_at: string | null;
+  intervals: number[];
+  weather: {
+    when?: string;
+    temp_c?: number | null;
+    rh?: number | null;
+    dewpoint_c?: number | null;
+    spread_c?: number | null;
+    precip_mm?: number | null;
+  } | null;
+};
 
 type Alert = { level: "ok" | "warn" | "crit"; code: string; message: string };
 
@@ -79,7 +100,7 @@ export default function System() {
         <div>
           <h1 className="display text-4xl text-ice">System</h1>
           <p className="mt-2 max-w-2xl text-sm text-white/50">
-            Pi health for overnight capture: disk, heat, RAM, and CPU. Refreshes every two seconds.
+            Pi health for overnight capture, plus the USB dew pad. Auto uses site humidity, not 24/7 heat.
           </p>
         </div>
         {data ? (
@@ -94,6 +115,7 @@ export default function System() {
 
       {data ? (
         <>
+          <DewPanel />
           <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <MeterCard
               title="CPU"
@@ -212,6 +234,112 @@ export default function System() {
         </>
       ) : null}
     </div>
+  );
+}
+
+function DewPanel() {
+  const client = useQueryClient();
+  const query = useQuery({
+    queryKey: ["dew"],
+    queryFn: () =>
+      fetch("/api/dew").then((r) => {
+        if (!r.ok) throw new Error("Dew status unavailable");
+        return r.json() as Promise<DewState>;
+      }),
+    refetchInterval: 4_000,
+  });
+  const send = useMutation({
+    mutationFn: async (patch: Partial<Pick<DewState, "mode" | "interval_min">>) => {
+      const res = await fetch("/api/dew", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json() as Promise<DewState>;
+    },
+    onSuccess: (data) => client.setQueryData(["dew"], data),
+  });
+  const dew = query.data;
+  const weather = dew?.weather;
+  const intervals = dew?.intervals ?? [3, 5, 10, 15, 30];
+  const reason =
+    dew?.reason === "humidity"
+      ? "Night, humidity high"
+      : dew?.reason === "dewpoint"
+        ? "Night, near dew point"
+        : dew?.reason === "rain"
+          ? "Night rain"
+          : dew?.reason === "day"
+            ? "Day — pad off"
+            : dew?.reason === "dry"
+              ? "Night, air dry enough"
+              : dew?.reason === "manual"
+                ? dew.mode === "on"
+                  ? "Forced on"
+                  : "Forced off"
+                : "Idle";
+
+  return (
+    <section className="rounded-2xl border border-white/8 bg-panel/70 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">Dew heater</p>
+          <p className="mt-1 text-sm text-white/70">
+            USB 5 V pad. Auto heats only at night when RH or dew-spread says the dome will wet.
+            Interval is how often auto re-checks — not a PWM blink.
+          </p>
+        </div>
+        <p
+          className={`rounded-full px-3 py-1 text-sm ${
+            dew?.usb_on ? "bg-aurora/20 text-aurora" : "bg-white/10 text-white/55"
+          }`}
+        >
+          {dew?.usb_on == null ? "USB ?" : dew.usb_on ? "Pad on" : "Pad off"}
+        </p>
+      </div>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        {(["off", "on", "auto"] as const).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            disabled={send.isPending}
+            onClick={() => send.mutate({ mode })}
+            className={`rounded-full px-4 py-1.5 text-sm capitalize ${
+              dew?.mode === mode ? "bg-ice text-ink" : "bg-white/10 text-white/70 hover:text-white"
+            }`}
+          >
+            {mode === "off" ? "Off" : mode === "on" ? "On" : "Auto"}
+          </button>
+        ))}
+        <label className="ml-2 flex items-center gap-2 text-sm text-white/60">
+          Check
+          <select
+            className="rounded-full bg-white/10 px-3 py-1.5 text-white"
+            value={dew?.interval_min ?? 10}
+            onChange={(event) => send.mutate({ interval_min: Number(event.target.value) })}
+          >
+            {intervals.map((mins) => (
+              <option key={mins} value={mins}>
+                {mins} min
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <dl className="mt-4 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <Row label="Why" value={reason} />
+        <Row label="Air" value={weather?.temp_c != null ? `${weather.temp_c}°C` : "—"} />
+        <Row label="RH" value={weather?.rh != null ? `${weather.rh}%` : "—"} />
+        <Row
+          label="Spread"
+          value={weather?.spread_c != null ? `${weather.spread_c}°C` : "—"}
+          warn={weather?.spread_c != null && weather.spread_c <= (dew?.spread_c ?? 4)}
+        />
+      </dl>
+      {dew?.error ? <p className="mt-3 text-sm text-amber-300">{dew.error}</p> : null}
+      {send.isError ? <p className="mt-2 text-sm text-amber-300">{String(send.error)}</p> : null}
+    </section>
   );
 }
 

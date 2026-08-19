@@ -1,0 +1,5 @@
+# Passwordless USB VBUS switch for the dew pad (Pi 5 uhubctl).
+# Install:
+#   sudo cp deploy/native/sudoers-zenith-dew /etc/sudoers.d/zenith-dew
+#   sudo chmod 440 /etc/sudoers.d/zenith-dew
+acmeastro ALL=(root) NOPASSWD: /usr/sbin/uhubctl

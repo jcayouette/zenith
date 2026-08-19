@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Test USB-A VBUS on/off for a 5 V dew pad on this Pi 5.
+# All four USB-A ports share one power switch: off kills every USB device.
+# WiFi is onboard and is not affected. A dumb heater does not appear in lsusb.
+#
+#   ./scripts/dew-heater status
+#   ./scripts/dew-heater on
+#   ./scripts/dew-heater off
+#   ./scripts/dew-heater cycle 5
+#
+# Needs uhubctl (Pi 5: build from https://github.com/mvp/uhubctl — Bookworm 2.5.0 is old).
+# Override hubs: DEW_USB_HUBS="2 4" ./scripts/dew-heater off
+
+set -euo pipefail
+
+die() { echo "dew-heater: $*" >&2; exit 1; }
+
+need_uhubctl() {
+  command -v uhubctl >/dev/null 2>&1 || die "uhubctl not found. Install from https://github.com/mvp/uhubctl"
+}
+
+sudo_uhubctl() {
+  if [ "$(id -u)" -eq 0 ]; then
+    uhubctl "$@"
+  else
+    sudo -n uhubctl "$@" 2>/dev/null || sudo uhubctl "$@"
+  fi
+}
+
+hubs() {
+  if [ -n "${DEW_USB_HUBS:-}" ]; then
+    # shellcheck disable=SC2086
+    echo $DEW_USB_HUBS
+    return
+  fi
+  local found
+  found=$(sudo_uhubctl 2>/dev/null | awk '/Current status for hub / { print $5 }' | sort -u | tr '\n' ' ')
+  found=${found%% }
+  if [ -n "$found" ]; then
+    echo "$found"
+    return
+  fi
+  echo "1 2 3 4"
+}
+
+set_all() {
+  local action=$1 loc
+  local ok=0
+  for loc in $(hubs); do
+    if sudo_uhubctl -l "$loc" -a "$action"; then
+      ok=1
+    fi
+  done
+  [ "$ok" -eq 1 ] || die "uhubctl could not switch any hub. Run: sudo uhubctl"
+}
+
+cmd_status() {
+  echo "USB hubs (Pi 5: all USB-A ports are ganged — one switch):"
+  sudo_uhubctl || true
+}
+
+usage() {
+  cat <<'EOF'
+Usage: dew-heater on|off|status|cycle [seconds]
+
+  on       Power USB-A ports (dew heater on)
+  off      Cut USB-A VBUS (dew heater off; all USB devices)
+  status   Show uhubctl hub/port state
+  cycle N  Off for N seconds (default 5), then on
+
+10-minute on/off cycling is safe for a 5 V / 0.2 A pad. Do not PWM this.
+EOF
+}
+
+need_uhubctl
+case "${1:-}" in
+  on) set_all 1 ;;
+  off) set_all 0 ;;
+  status) cmd_status ;;
+  cycle)
+    secs=${2:-5}
+    set_all 0
+    echo "USB off for ${secs}s…"
+    sleep "$secs"
+    set_all 1
+    echo "USB on."
+    ;;
+  -h|--help|help|"") usage ;;
+  *) usage; exit 1 ;;
+esac

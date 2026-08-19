@@ -5,6 +5,7 @@ import Processed from "./pages/Processed";
 import Settings from "./pages/Settings";
 import Sky from "./pages/Sky";
 import System from "./pages/System";
+import Detections from "./pages/Detections";
 import Placeholder from "./pages/Placeholder";
 
 const links = [
@@ -59,10 +60,7 @@ export default function App() {
             element={<Placeholder title="Charts" note="Exposure, ADU, star count, SQM, Kp, and sensors." />}
           />
           <Route path="/sky" element={<Sky />} />
-          <Route
-            path="/detections"
-            element={<Placeholder title="Detections" note="Meteors, aircraft, and highlight reels." />}
-          />
+          <Route path="/detections" element={<Detections />} />
           <Route
             path="/system"
             element={<System />}

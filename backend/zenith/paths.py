@@ -15,7 +15,7 @@ LATEST_META = DATA_DIR / "latest.json"
 FRONTEND_DIST = REPO_ROOT / "frontend" / "dist"
 
 
-PROCESSED_KINDS = ("keograms", "startrails", "timelapses", "developed")
+PROCESSED_KINDS = ("keograms", "startrails", "timelapses", "developed", "detections")
 
 PRODUCT_PLACES = {
     "keogram.jpg": "keograms",
@@ -23,6 +23,7 @@ PRODUCT_PLACES = {
     "startrails.jpg": "startrails",
     "startrails.json": "startrails",
     "startrails_stack.png": "startrails",
+    "meteors.mp4": "detections",
     "timelapse.mp4": "timelapses",
     "mini.mp4": "timelapses",
 }

@@ -55,3 +55,46 @@ def encode_timelapse(
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return False
     return dest.is_file() and dest.stat().st_size > 0
+
+
+def encode_image_list(frames: list[Path], dest: Path, fps: int = 4) -> bool:
+    """Slideshow MP4 from an ordered list of stills (meteor highlight reel)."""
+    usable = [p for p in frames if p.is_file()]
+    if len(usable) < 1:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    listing = dest.with_name(dest.stem + "_concat.txt")
+    listing.write_text("".join(f"file '{path.resolve()}'\nduration {1 / max(fps, 1)}\n" for path in usable) + f"file '{usable[-1].resolve()}'\n")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(listing),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-vf",
+        "scale=960:-2",
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    try:
+        subprocess.run(cmd, check=True, timeout=180)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    finally:
+        listing.unlink(missing_ok=True)
+    return dest.is_file() and dest.stat().st_size > 0

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Print area temperature, RH, and dew point from Open-Meteo (no API key).
+# Uses Settings lat/lon when data/config.yaml is present.
+#
+#   ./scripts/dew-weather
+#
+# This is 2 m outdoor air for the grid cell, not the plastic dome skin.
+
+set -euo pipefail
+
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+LAT=${DEW_LAT:-}
+LON=${DEW_LON:-}
+
+if [ -z "$LAT" ] || [ -z "$LON" ]; then
+  CFG="$ROOT/data/config.yaml"
+  if [ -f "$CFG" ]; then
+    LAT=$(awk '/^  latitude:/{print $2; exit}' "$CFG")
+    LON=$(awk '/^  longitude:/{print $2; exit}' "$CFG")
+  fi
+fi
+LAT=${LAT:-49.6278487}
+LON=${LON:-10.8792215}
+
+URL="https://api.open-meteo.com/v1/forecast?latitude=${LAT}&longitude=${LON}&current=temperature_2m,relative_humidity_2m,dew_point_2m&timezone=auto"
+
+python3 - "$URL" "$LAT" "$LON" <<'PY'
+import json, sys, urllib.request
+
+url, lat, lon = sys.argv[1], sys.argv[2], sys.argv[3]
+with urllib.request.urlopen(url, timeout=15) as resp:
+    data = json.load(resp)
+cur = data.get("current") or {}
+t = cur.get("temperature_2m")
+rh = cur.get("relative_humidity_2m")
+dp = cur.get("dew_point_2m")
+gap = None if t is None or dp is None else round(float(t) - float(dp), 1)
+print(f"site     {lat}, {lon}")
+print(f"when     {cur.get('time', '—')}")
+print(f"temp     {t} °C")
+print(f"RH       {rh} %")
+print(f"dewpoint {dp} °C")
+print(f"spread   {gap} °C  (air − dewpoint; <2 °C is dew-likely)")
+if gap is not None and gap <= 2:
+    print("hint     heater ON  (moist; dome will run colder than this air)")
+elif rh is not None and float(rh) >= 85:
+    print("hint     heater ON  (high RH)")
+else:
+    print("hint     heater likely OFF for a 1 W pad test; dome still cools below air temp")
+PY

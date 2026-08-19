@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -159,7 +160,7 @@ def list_processed(category: str | None = None) -> dict[str, Any]:
 def _processed_item(category: str, iso: str, path: Path) -> dict[str, Any]:
     key = path.name.rsplit(".", 1)[0]
     suffix = path.suffix.lower()
-    return {
+    item = {
         "date": iso,
         "category": category,
         "key": key,
@@ -171,6 +172,14 @@ def _processed_item(category: str, iso: str, path: Path) -> dict[str, Any]:
         "media": "video" if suffix == ".mp4" else "image",
         "archive_url": f"/archive/night/{iso}",
     }
+    if path.name == "startrails.jpg":
+        meta_path = path.with_name("startrails.json")
+        if meta_path.is_file():
+            try:
+                item["meta"] = json.loads(meta_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+    return item
 
 
 def list_sessions(kind: str) -> list[dict]:

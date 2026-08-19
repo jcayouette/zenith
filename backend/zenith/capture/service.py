@@ -312,12 +312,14 @@ class CaptureService:
                 )
                 saved = True
                 if session.kind == "night":
+                    stem = when_local.strftime("%Y%m%d_%H%M%S")
                     info = await asyncio.to_thread(
                         self.products.on_saved_frame,
                         rgb_linear,
                         mean,
                         session.date,
                         settings,
+                        stem,
                     )
                     stars = int(info["stars"])
             if not focus:

@@ -28,7 +28,8 @@ const GROUP_COPY: Record<string, string> = {
   night: "Exposure after night begins.",
   overlay: "Text on the live JPEG and thumbs. Raw stays clean.",
   sky: "Constellations, named stars, satellites, ADS-B, and a dimmed site map on the Sky page.",
-  products: "Keograms, startrails, and timelapses.",
+  products: "Keograms, startrails, timelapses, and streak detections.",
+  dew: "USB dew pad. Auto uses Open-Meteo humidity and dew point at the site, at night only.",
 };
 
 const GROUP_LABEL: Record<string, string> = {
@@ -42,6 +43,7 @@ const GROUP_LABEL: Record<string, string> = {
   overlay: "Overlay",
   sky: "Sky",
   products: "Products",
+  dew: "Dew heater",
 };
 
 function labelFor(key: string) {
