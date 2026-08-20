@@ -85,10 +85,10 @@ def ensure_usb_on() -> dict[str, Any]:
 
 
 def pad_set(pin: int, on: bool) -> dict[str, Any]:
-    """Drive the MOSFET gate. High = pad on. Does not touch USB."""
+    """Drive the relay Signal pin. Low = heater on (active-low module). Does not touch USB."""
     if not 2 <= int(pin) <= 27 or int(pin) in {2, 3}:
         return {"ok": False, "on": None, "error": f"refusing GPIO {pin} (use 17, not I2C 2/3)"}
-    cmd = [PINCTRL, "set", str(int(pin)), "op", "dh" if on else "dl"]
+    cmd = [PINCTRL, "set", str(int(pin)), "op", "dl" if on else "dh"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
     except FileNotFoundError:
@@ -113,7 +113,8 @@ def pad_is_on(pin: int) -> bool | None:
     text = proc.stdout
     if " op " not in text and ": op" not in text:
         return False
-    return " dh " in text or "| hi" in text
+    # Active-low: heater is on when the pin is driven low.
+    return " dl " in text or "| lo" in text
 
 
 def _uhubctl(*args: str) -> tuple[int, str]:

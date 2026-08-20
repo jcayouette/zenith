@@ -39,7 +39,7 @@ cmd_status() {
     fi
   fi
   echo
-  echo "Dew MOSFET gate BCM ${PIN} (header pin 11):"
+  echo "Dew relay Signal BCM ${PIN} (header pin 11, active-low):"
   "$PINCTRL" get "$PIN" || true
 }
 
@@ -47,8 +47,8 @@ usage() {
   cat <<'EOF'
 Usage: dew-heater on|off|status|usb-on
 
-  on       GPIO 17 high — pad on (MOSFET). USB stays on.
-  off      GPIO 17 low — pad off. USB stays on.
+  on       GPIO 17 low — heater on (active-low relay). USB stays on.
+  off      GPIO 17 high — heater off. USB stays on.
   status   Show USB (should be powered) and GPIO 17
   usb-on   Force USB-A VBUS on if the fan is dead after an old off command
 
@@ -58,8 +58,8 @@ EOF
 
 usb_on
 case "${1:-}" in
-  on) gpio_set dh ;;
-  off) gpio_set dl ;;
+  on) gpio_set dl ;;
+  off) gpio_set dh ;;
   status) cmd_status ;;
   usb-on) echo "USB VBUS forced on." ;;
   -h|--help|help|"") usage ;;

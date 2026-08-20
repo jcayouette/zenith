@@ -136,7 +136,9 @@ export default function AcLayer({
   const ssrPaintRef = useRef(new Map<string, RadarPaint>());
   const psrPaintRef = useRef(new Map<string, RadarPaint>());
   const sweepRef = useRef({ ssr: 0, psr: 0 });
+  const dtRef = useRef(dt);
   scaleRef.current = iconScale;
+  dtRef.current = dt;
   viewRef.current = view;
   liveViewRef.current = liveView;
   selectedRef.current = selectedId;
@@ -175,7 +177,32 @@ export default function AcLayer({
     resize();
     const ro = new ResizeObserver(resize);
     ro.observe(wrap);
+    const cap = () => coastCap(dtRef.current);
+    const rebase = () => {
+      const now = performance.now();
+      snapTracks(tracksRef.current, dtRef.current, now);
+      sweepRef.current.ssr = sweepAzimuth(now, SSR_PERIOD_S);
+      sweepRef.current.psr = sweepAzimuth(now, PSR_PERIOD_S);
+      for (const paint of ssrPaintRef.current.values()) {
+        const track = tracksRef.current.get(paint.id);
+        if (!track) continue;
+        paint.x = track.x0;
+        paint.y = track.y0;
+        paint.pingAt = now;
+      }
+      for (const paint of psrPaintRef.current.values()) {
+        const track = tracksRef.current.get(paint.id);
+        if (!track) continue;
+        paint.x = track.x0;
+        paint.y = track.y0;
+        paint.pingAt = now;
+      }
+    };
     const draw = (now: number) => {
+      if (document.hidden) {
+        raf = 0;
+        return;
+      }
       const w = wrap.clientWidth;
       const h = wrap.clientHeight;
       ctx.clearRect(0, 0, w, h);
@@ -191,13 +218,13 @@ export default function AcLayer({
       if (!psrOn) psrPaintRef.current.clear();
       if (ssrOn) {
         const az = sweepAzimuth(now, SSR_PERIOD_S);
-        pingSweep(tracksRef.current, ssrPaintRef.current, sweepRef.current.ssr, az, now);
+        pingSweep(tracksRef.current, ssrPaintRef.current, sweepRef.current.ssr, az, now, cap());
         sweepRef.current.ssr = az;
         drawSweep(ctx, viewNow, az, SSR_COLOR, now, 0);
       }
       if (psrOn) {
         const az = sweepAzimuth(now, PSR_PERIOD_S);
-        pingSweep(tracksRef.current, psrPaintRef.current, sweepRef.current.psr, az, now);
+        pingSweep(tracksRef.current, psrPaintRef.current, sweepRef.current.psr, az, now, cap());
         sweepRef.current.psr = az;
         drawSweep(ctx, viewNow, az, PSR_COLOR, now, 1);
       }
@@ -232,7 +259,7 @@ export default function AcLayer({
       if (gpsOn) {
         for (const track of tracksRef.current.values()) {
           if (track.meta.rim) continue;
-          const pos = coastPos(track, now);
+          const pos = coastPos(track, now, cap());
           const [px, py] = overlayToScreen(pos.x, pos.y, viewNow);
           if (px < -16 || py < -16 || px > w + 16 || py > h + 16) continue;
           const color = acColor(track.meta.ground_km);
@@ -245,9 +272,20 @@ export default function AcLayer({
       }
       raf = window.requestAnimationFrame(draw);
     };
+    const onVis = () => {
+      if (document.hidden) {
+        if (raf) window.cancelAnimationFrame(raf);
+        raf = 0;
+        return;
+      }
+      rebase();
+      if (!raf) raf = window.requestAnimationFrame(draw);
+    };
+    document.addEventListener("visibilitychange", onVis);
     raf = window.requestAnimationFrame(draw);
     return () => {
       window.cancelAnimationFrame(raf);
+      document.removeEventListener("visibilitychange", onVis);
       ro.disconnect();
     };
   }, []);
@@ -277,7 +315,7 @@ export default function AcLayer({
     };
     if (gpsOn) {
       for (const track of tracksRef.current.values()) {
-        const pos = coastPos(track, now);
+        const pos = coastPos(track, now, coastCap(dtRef.current));
         const [px, py] = overlayToScreen(pos.x, pos.y, viewNow);
         consider(track.id, px, py, track);
         if (track.meta.from_x != null && track.meta.from_y != null) {
@@ -341,9 +379,34 @@ export default function AcLayer({
   );
 }
 
-function coastPos(track: Track, now: number) {
-  const age = (now - track.t0) / 1000;
+function coastCap(dt: number) {
+  return Math.max(dt * 1.6, 1.2);
+}
+
+function coastPos(track: Track, now: number, cap?: number) {
+  let age = (now - track.t0) / 1000;
+  if (age < 0) age = 0;
+  if (cap != null) age = Math.min(age, cap);
   return { x: track.x0 + track.vx * age, y: track.y0 + track.vy * age };
+}
+
+function sampleVel(s: AcPt, look: number) {
+  return {
+    vx: s.x2 != null ? (s.x2 - s.x) / look : 0,
+    vy: s.y2 != null ? (s.y2 - s.y) / look : 0,
+  };
+}
+
+function snapTracks(tracks: Map<string, Track>, dt: number, now: number) {
+  const look = Math.max(dt, 1);
+  for (const track of tracks.values()) {
+    const { vx, vy } = sampleVel(track.meta, look);
+    track.x0 = track.meta.x;
+    track.y0 = track.meta.y;
+    track.vx = vx;
+    track.vy = vy;
+    track.t0 = now;
+  }
 }
 
 function sameMotion(a: AcPt, b: AcPt) {
@@ -360,10 +423,11 @@ function pingSweep(
   prevAz: number,
   nextAz: number,
   now: number,
+  cap: number,
 ) {
   for (const track of tracks.values()) {
     if (track.meta.rim) continue;
-    const pos = coastPos(track, now);
+    const pos = coastPos(track, now, cap);
     const az = trackAzimuth(pos.x, pos.y);
     const first = !paints.has(track.id);
     if (!first && !sweepCrossed(prevAz, nextAz, az)) continue;
@@ -696,18 +760,23 @@ function ingest(samples: AcPt[], dt: number, now: number, prev: Map<string, Trac
       next.set(id, { ...old, name: s.name || old.name, meta: s });
       continue;
     }
-    const vx = s.x2 != null ? (s.x2 - s.x) / look : 0;
-    const vy = s.y2 != null ? (s.y2 - s.y) / look : 0;
+    const { vx, vy } = sampleVel(s, look);
     let x0 = s.x;
     let y0 = s.y;
     let ovx = vx;
     let ovy = vy;
     if (old) {
+      const gap = (now - old.t0) / 1000;
       const pos = coastPos(old, now);
-      x0 = pos.x;
-      y0 = pos.y;
-      ovx = (s.x + vx * catchup - pos.x) / catchup;
-      ovy = (s.y + vy * catchup - pos.y) / catchup;
+      const err = Math.hypot(s.x - pos.x, s.y - pos.y);
+      const expected = Math.hypot(vx, vy) * look * 2 + 0.012;
+      const stale = gap > look * 2 || err > expected || document.hidden;
+      if (!stale) {
+        x0 = pos.x;
+        y0 = pos.y;
+        ovx = (s.x + vx * catchup - pos.x) / catchup;
+        ovy = (s.y + vy * catchup - pos.y) / catchup;
+      }
     }
     next.set(id, { id, name: s.name || id, x0, y0, vx: ovx, vy: ovy, t0: now, meta: s });
   }
