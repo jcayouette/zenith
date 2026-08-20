@@ -506,10 +506,18 @@ class SkySettings(BaseModel):
 
 class DewSettings(BaseModel):
     mode: Literal["off", "on", "auto"] = _f(
-        "USB dew pad: off, forced on, or auto from Open-Meteo RH / dew point at the site. "
-        "Auto only heats at night when the air is wet enough — not 24/7.",
+        "GPIO dew pad: off, forced on, or auto from Open-Meteo RH / dew point at the site. "
+        "Auto only heats at night when the air is wet enough — not 24/7. "
+        "USB-A power is never cut (the Pi 5 fan shares that rail).",
         default="off",
         title="Dew heater",
+    )
+    gpio_pin: int = _f(
+        "BCM GPIO that drives the MOSFET gate. 17 is header pin 11. Do not use 2 or 3 (I2C / PoE).",
+        default=17,
+        ge=4,
+        le=27,
+        title="Dew GPIO",
     )
     interval_min: int = _f(
         "How often auto re-checks humidity (minutes). 3–10 is for testing; 10–15 is overnight.",

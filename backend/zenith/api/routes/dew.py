@@ -11,6 +11,7 @@ class DewPatch(BaseModel):
     interval_min: int | None = Field(default=None, ge=1, le=60)
     rh_on: float | None = None
     spread_c: float | None = None
+    gpio_pin: int | None = Field(default=None, ge=4, le=27)
 
 
 @router.get("")

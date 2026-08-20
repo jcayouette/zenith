@@ -45,6 +45,21 @@ class DewHeatTests(unittest.TestCase):
         self.assertTrue(on)
         self.assertEqual(reason, "rain")
 
+    def test_uhubctl_refuses_usb_off(self):
+        from zenith.io.dew import _uhubctl
+
+        code, msg = _uhubctl("-l", "2", "-a", "0")
+        self.assertNotEqual(code, 0)
+        self.assertIn("refusing USB off", msg)
+        code, msg = _uhubctl("-l", "2", "-a", "off")
+        self.assertNotEqual(code, 0)
+
+    def test_gpio_2_3_refused(self):
+        from zenith.io.dew import pad_set
+
+        self.assertFalse(pad_set(2, True)["ok"])
+        self.assertFalse(pad_set(3, True)["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

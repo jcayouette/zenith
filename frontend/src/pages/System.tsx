@@ -5,7 +5,10 @@ type DewState = {
   interval_min: number;
   rh_on: number;
   spread_c: number;
+  gpio_pin: number;
+  pad_on: boolean | null;
   usb_on: boolean | null;
+  usb_switching: boolean;
   wanted: boolean;
   reason: string;
   error: string | null;
@@ -100,7 +103,7 @@ export default function System() {
         <div>
           <h1 className="display text-4xl text-ice">System</h1>
           <p className="mt-2 max-w-2xl text-sm text-white/50">
-            Pi health for overnight capture, plus the USB dew pad. Auto uses site humidity, not 24/7 heat.
+            Pi health for overnight capture, plus the GPIO dew pad. Auto uses site humidity, not 24/7 heat. USB stays on so the cooler can spin.
           </p>
         </div>
         {data ? (
@@ -286,16 +289,16 @@ function DewPanel() {
         <div>
           <p className="text-[11px] uppercase tracking-[0.22em] text-white/40">Dew heater</p>
           <p className="mt-1 text-sm text-white/70">
-            USB 5 V pad. Auto heats only at night when RH or dew-spread says the dome will wet.
-            Interval is how often auto re-checks — not a PWM blink.
+            5 V / 0.2 A pad on GPIO {dew?.gpio_pin ?? 17} (MOSFET). Auto heats at night when RH or
+            dew-spread says the dome will wet. USB-A is never switched — that rail feeds the CPU fan.
           </p>
         </div>
         <p
           className={`rounded-full px-3 py-1 text-sm ${
-            dew?.usb_on ? "bg-aurora/20 text-aurora" : "bg-white/10 text-white/55"
+            dew?.pad_on ? "bg-aurora/20 text-aurora" : "bg-white/10 text-white/55"
           }`}
         >
-          {dew?.usb_on == null ? "USB ?" : dew.usb_on ? "Pad on" : "Pad off"}
+          {dew?.pad_on == null ? "Pad ?" : dew.pad_on ? "Pad on" : "Pad off"}
         </p>
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -315,12 +318,12 @@ function DewPanel() {
         <label className="ml-2 flex items-center gap-2 text-sm text-white/60">
           Check
           <select
-            className="rounded-full bg-white/10 px-3 py-1.5 text-white"
+            className="rounded-full border border-white/12 bg-panel px-3 py-1.5 text-white"
             value={dew?.interval_min ?? 10}
             onChange={(event) => send.mutate({ interval_min: Number(event.target.value) })}
           >
             {intervals.map((mins) => (
-              <option key={mins} value={mins}>
+              <option key={mins} value={mins} className="bg-panel text-white">
                 {mins} min
               </option>
             ))}

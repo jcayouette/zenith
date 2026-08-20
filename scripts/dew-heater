@@ -1,90 +1,67 @@
 #!/usr/bin/env bash
-# Test USB-A VBUS on/off for a 5 V dew pad on this Pi 5.
-# All four USB-A ports share one power switch: off kills every USB device.
-# WiFi is onboard and is not affected. A dumb heater does not appear in lsusb.
+# GPIO dew pad on BCM 17 (header pin 11). USB-A VBUS is NEVER cut.
+# On Pi 5 the Active Cooler 5 V is downstream of USB_VBUS_EN — uhubctl off kills the fan.
 #
-#   ./scripts/dew-heater status
-#   ./scripts/dew-heater on
-#   ./scripts/dew-heater off
-#   ./scripts/dew-heater cycle 5
-#
-# Needs uhubctl (Pi 5: build from https://github.com/mvp/uhubctl — Bookworm 2.5.0 is old).
-# Override hubs: DEW_USB_HUBS="2 4" ./scripts/dew-heater off
+#   ./scripts/dew-heater on|off|status
+#   ./scripts/dew-heater usb-on    # emergency: force USB VBUS on (fan rail)
 
 set -euo pipefail
 
+PINCTRL=${PINCTRL:-/usr/bin/pinctrl}
+PIN=${DEW_GPIO:-17}
+
 die() { echo "dew-heater: $*" >&2; exit 1; }
 
-need_uhubctl() {
-  command -v uhubctl >/dev/null 2>&1 || die "uhubctl not found. Install from https://github.com/mvp/uhubctl"
-}
-
-sudo_uhubctl() {
-  if [ "$(id -u)" -eq 0 ]; then
-    uhubctl "$@"
-  else
-    sudo -n uhubctl "$@" 2>/dev/null || sudo uhubctl "$@"
-  fi
-}
-
-hubs() {
-  if [ -n "${DEW_USB_HUBS:-}" ]; then
-    # shellcheck disable=SC2086
-    echo $DEW_USB_HUBS
-    return
-  fi
-  local found
-  found=$(sudo_uhubctl 2>/dev/null | awk '/Current status for hub / { print $5 }' | sort -u | tr '\n' ' ')
-  found=${found%% }
-  if [ -n "$found" ]; then
-    echo "$found"
-    return
-  fi
-  echo "1 2 3 4"
-}
-
-set_all() {
-  local action=$1 loc
-  local ok=0
-  for loc in $(hubs); do
-    if sudo_uhubctl -l "$loc" -a "$action"; then
-      ok=1
+usb_on() {
+  local loc ok=0
+  command -v uhubctl >/dev/null 2>&1 || return 0
+  for loc in 1 2 3 4; do
+    if [ "$(id -u)" -eq 0 ]; then
+      uhubctl -l "$loc" -a 1 >/dev/null 2>&1 && ok=1
+    else
+      sudo -n uhubctl -l "$loc" -a 1 >/dev/null 2>&1 && ok=1 || true
     fi
   done
-  [ "$ok" -eq 1 ] || die "uhubctl could not switch any hub. Run: sudo uhubctl"
+  return 0
+}
+
+gpio_set() {
+  local level=$1
+  [ -x "$PINCTRL" ] || die "pinctrl not found"
+  "$PINCTRL" set "$PIN" op "$level"
 }
 
 cmd_status() {
-  echo "USB hubs (Pi 5: all USB-A ports are ganged — one switch):"
-  sudo_uhubctl || true
+  echo "USB VBUS: locked ON (Pi 5 fan). Never switched."
+  if command -v uhubctl >/dev/null 2>&1; then
+    if [ "$(id -u)" -eq 0 ]; then uhubctl || true
+    else sudo -n uhubctl || true
+    fi
+  fi
+  echo
+  echo "Dew MOSFET gate BCM ${PIN} (header pin 11):"
+  "$PINCTRL" get "$PIN" || true
 }
 
 usage() {
   cat <<'EOF'
-Usage: dew-heater on|off|status|cycle [seconds]
+Usage: dew-heater on|off|status|usb-on
 
-  on       Power USB-A ports (dew heater on)
-  off      Cut USB-A VBUS (dew heater off; all USB devices)
-  status   Show uhubctl hub/port state
-  cycle N  Off for N seconds (default 5), then on
+  on       GPIO 17 high — pad on (MOSFET). USB stays on.
+  off      GPIO 17 low — pad off. USB stays on.
+  status   Show USB (should be powered) and GPIO 17
+  usb-on   Force USB-A VBUS on if the fan is dead after an old off command
 
-10-minute on/off cycling is safe for a 5 V / 0.2 A pad. Do not PWM this.
+There is no usb-off. Do not add one.
 EOF
 }
 
-need_uhubctl
+usb_on
 case "${1:-}" in
-  on) set_all 1 ;;
-  off) set_all 0 ;;
+  on) gpio_set dh ;;
+  off) gpio_set dl ;;
   status) cmd_status ;;
-  cycle)
-    secs=${2:-5}
-    set_all 0
-    echo "USB off for ${secs}s…"
-    sleep "$secs"
-    set_all 1
-    echo "USB on."
-    ;;
+  usb-on) echo "USB VBUS forced on." ;;
   -h|--help|help|"") usage ;;
   *) usage; exit 1 ;;
 esac

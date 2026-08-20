@@ -1,4 +1,4 @@
-"""USB dew pad: manual on/off and auto from Open-Meteo humidity / dew point."""
+"""GPIO dew pad. USB-A VBUS is never cut — the Pi 5 fan is on that rail."""
 
 from __future__ import annotations
 
@@ -7,22 +7,23 @@ import json
 import os
 import subprocess
 from datetime import datetime, timezone
-from time import time
 from typing import Any
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from zenith.config.schema import DewSettings, ZenithSettings
+from zenith.config.schema import DewSettings
 from zenith.config.store import load_settings, merge_settings, persist_cache
 from zenith.sky.sun import sun_altitude_deg
 
 UHUBCTL = "/usr/sbin/uhubctl"
+PINCTRL = "/usr/bin/pinctrl"
 OPEN_METEO = (
     "https://api.open-meteo.com/v1/forecast"
     "?latitude={lat}&longitude={lon}"
     "&current=temperature_2m,relative_humidity_2m,dew_point_2m,precipitation"
     "&timezone=auto"
 )
+# BCM GPIO 17 = header pin 11. Avoid 2/3 (I2C / PoE HAT).
 
 
 def want_heat(
@@ -68,32 +69,58 @@ def fetch_weather(lat: float, lon: float) -> dict[str, Any]:
     }
 
 
-def usb_set(on: bool) -> dict[str, Any]:
-    action = "1" if on else "0"
+def ensure_usb_on() -> dict[str, Any]:
+    """Force USB-A VBUS on so the Active Cooler 5 V stays up. Never turns it off."""
     errors: list[str] = []
     ok = 0
     for loc in ("1", "2", "3", "4"):
-        code, out = _uhubctl("-l", loc, "-a", action)
+        code, out = _uhubctl("-l", loc, "-a", "1")
         if code == 0:
             ok += 1
         elif out:
             errors.append(out)
     if ok == 0:
-        return {"ok": False, "on": None, "error": errors[-1] if errors else "uhubctl failed"}
+        return {"ok": False, "error": errors[-1] if errors else "uhubctl failed"}
+    return {"ok": True, "error": None}
+
+
+def pad_set(pin: int, on: bool) -> dict[str, Any]:
+    """Drive the MOSFET gate. High = pad on. Does not touch USB."""
+    if not 2 <= int(pin) <= 27 or int(pin) in {2, 3}:
+        return {"ok": False, "on": None, "error": f"refusing GPIO {pin} (use 17, not I2C 2/3)"}
+    cmd = [PINCTRL, "set", str(int(pin)), "op", "dh" if on else "dl"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+    except FileNotFoundError:
+        return {"ok": False, "on": None, "error": f"{PINCTRL} not found"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "on": None, "error": "pinctrl timed out"}
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "pinctrl failed").strip()
+        return {"ok": False, "on": None, "error": err}
     return {"ok": True, "on": on, "error": None}
 
 
-def usb_is_on() -> bool | None:
-    code, out = _uhubctl()
-    if code != 0:
+def pad_is_on(pin: int) -> bool | None:
+    try:
+        proc = subprocess.run(
+            [PINCTRL, "get", str(int(pin))], capture_output=True, text=True, timeout=4
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    ports = [line for line in out.splitlines() if "Port " in line]
-    if not ports:
+    if proc.returncode != 0:
         return None
-    return any(" power" in line for line in ports)
+    text = proc.stdout
+    if " op " not in text and ": op" not in text:
+        return False
+    return " dh " in text or "| hi" in text
 
 
 def _uhubctl(*args: str) -> tuple[int, str]:
+    if "-a" in args:
+        idx = args.index("-a")
+        if idx + 1 < len(args) and str(args[idx + 1]) in {"0", "off", "Off"}:
+            return 1, "refusing USB off (Pi 5 fan shares VBUS)"
     cmd = [UHUBCTL, *args]
     if os.geteuid() != 0:
         cmd = ["sudo", "-n", *cmd]
@@ -113,7 +140,8 @@ class DewHeater:
         self._wake = asyncio.Event()
         self.last: dict[str, Any] = {
             "mode": "off",
-            "usb_on": None,
+            "pad_on": None,
+            "usb_on": True,
             "wanted": False,
             "reason": "idle",
             "weather": None,
@@ -137,14 +165,18 @@ class DewHeater:
     def snapshot(self) -> dict[str, Any]:
         settings = load_settings()
         dew = settings.dew
-        usb = usb_is_on()
+        pin = int(dew.gpio_pin)
+        pad = pad_is_on(pin)
         return {
             **self.last,
             "mode": dew.mode,
             "interval_min": dew.interval_min,
             "rh_on": dew.rh_on,
             "spread_c": dew.spread_c,
-            "usb_on": usb if usb is not None else self.last.get("usb_on"),
+            "gpio_pin": pin,
+            "pad_on": pad if pad is not None else self.last.get("pad_on"),
+            "usb_on": True,
+            "usb_switching": False,
             "intervals": [1, 3, 5, 10, 15, 30],
         }
 
@@ -158,6 +190,8 @@ class DewHeater:
             allowed["rh_on"] = float(patch["rh_on"])
         if "spread_c" in patch:
             allowed["spread_c"] = float(patch["spread_c"])
+        if "gpio_pin" in patch:
+            allowed["gpio_pin"] = int(patch["gpio_pin"])
         if allowed:
             merge_settings({"dew": allowed})
             persist_cache()
@@ -169,11 +203,15 @@ class DewHeater:
         settings = load_settings()
         dew = settings.dew
         loc = settings.location
+        pin = int(dew.gpio_pin)
         error = None
         weather = self.last.get("weather")
         reason = "idle"
         wanted = False
         try:
+            usb = ensure_usb_on()
+            if not usb["ok"]:
+                error = usb.get("error") or "USB force-on failed"
             if dew.mode == "on":
                 wanted, reason = True, "manual"
             elif dew.mode == "off":
@@ -193,17 +231,19 @@ class DewHeater:
                     night_alt=loc.night_sun_altitude_deg,
                     dew=dew,
                 )
-            usb = usb_set(wanted)
-            if not usb["ok"]:
-                error = usb.get("error") or "USB switch failed"
+            pad = pad_set(pin, wanted)
+            if not pad["ok"]:
+                error = pad.get("error") or "GPIO switch failed"
             self.last = {
                 "mode": dew.mode,
-                "usb_on": usb.get("on"),
+                "pad_on": pad.get("on"),
+                "usb_on": True,
                 "wanted": wanted,
                 "reason": reason,
                 "weather": weather,
                 "error": error,
                 "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "gpio_pin": pin,
             }
         except Exception as exc:
             self.last["error"] = str(exc)

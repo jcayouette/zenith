@@ -16,6 +16,17 @@ body,
   min-height: 100%;
 }
 
+html {
+  color-scheme: dark;
+}
+
+/* Native <option> lists ignore the select's white text unless they get their own colors.
+   Without this, unselected rows are white-on-white; only the blue highlight is readable. */
+select option {
+  background-color: #101826;
+  color: #e8eef8;
+}
+
 body {
   margin: 0;
   background: #070b14;
